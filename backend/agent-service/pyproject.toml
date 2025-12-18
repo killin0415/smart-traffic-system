@@ -1,0 +1,21 @@
+[project]
+name = "agent-service"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "confluent-kafka>=2.12.2",
+    "fastapi>=0.124.0",
+    "grpcio>=1.76.0",
+    "grpcio-tools>=1.71.2",
+    "langchain>=1.1.2",
+    "openai>=2.9.0",
+    "opencv-python>=4.11.0.86",
+    "psycopg2-binary>=2.9.11",
+    "pyautogen>=0.10.0",
+    "redis>=7.1.0",
+    "sqlalchemy>=2.0.44",
+    "ultralytics>=8.3.235",
+    "uvicorn>=0.38.0",
+]
