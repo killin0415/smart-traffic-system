@@ -1,0 +1,28 @@
+server:
+  port: 8081
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+spring:
+  application:
+    name: main-service
+
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: main-service-group
+      auto-offset-reset: latest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+# gRPC agent-service connection
+grpc:
+  agent-service:
+    host: localhost
+    port: 50051

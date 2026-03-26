@@ -1,0 +1,391 @@
+基於多智慧體系統之智慧交通導航與對話助理平台 
+資訊⼯程學系三年級—廖⼦閔
+1
+Abstract  3
+1.系統架構設計  4
+1.1.系統架構圖	 
+4
+1.2.技術棧	 
+5
+2.資料建模與存儲  6
+2.1.ER diagram	 
+6
+2.1.1.User & UserProﬁle	 
+6
+2.1.2.TimescaleDB Hyper-tables	 
+7
+3.API 與介⾯規範  8
+3.1.移動端 API	 
+8
+3.2.外部對接表	 
+9
+4.業務邏輯和流程分析  9
+4.1.Sequence Diagram	 
+9
+4.1.1.User registration	 
+9
+4.1.2.User Login	 
+10
+4.1.3.Chat Manager 與 LLM 推論流程	 
+11
+4.1.4.影像處理與資料儲存	 
+11
+5.非功能性需求與系統安全 (Technical Constraints & Security)  12
+5.1.⾝份驗證與授權 (Authentication & Authorization)	 
+12
+5.2.併發處理與效能 (Concurrency & Performance)	 
+12
+5.3.監控與⽇誌 (Observability)	 
+13
+6.結論 13
+2
+Abstract 
+本專題旨在解決現代城市交通⾯臨的壅塞、停⾞位難尋及資訊分散整合困難等問題。我
+們設計並實作了⼀套結合多智慧體系統 (Multi-Agent System, MAS)、微服務架構與即
+時數據串流技術的智慧交通導航與對話助理平台。
+系統核⼼採⽤ Agent 協作架構，透過 Group Chat Manager 協調 Route Agent、
+Parking Agent 及 Forecast Agent 等專家智慧體，並整合 YOLO 影像辨識、LSTM/
+GRU 流量預測及 RAG (Retrieval-Augmented Generation) 技術。使⽤者可透過⾃然
+語⾔與 Chatbot 互動，獲取考量即時流量與預測模型的動態路徑推薦，以及整合即時影
+像分析的停⾞位資訊。
+技術實作上，本平台運⽤ Kafka 建立事件驅動架構，並以 gRPC 進⾏⾼效內部通訊，搭
+配 TimescaleDB 與 Redis 處理時序數據與快取，確保系統在⼤數據流量下的即時性與
+穩定性。本研究期能透過創新的軟體架構與 AI 整合，提供更直覺且智慧化的交通解決⽅
+案，有效提升駕駛⼈的出⾏效率。
+3
+1.系統架構設計 
+1.1.系統架構圖
+4
+Mobile client
+multiagent service
+Explainer agentRoute agent
+Chat manager
+YOLO node
+YOLO node
+Kafka cluster
+broker
+broker
+broker
+Zookeeper
+透過Kafka異步接收及發送資料給其他service
+Consumer/Producer
+Consumer/Producer
+main service
+<<server cluster>>
+Spring boot server
+Producer
+Producer
+cctv
+cctv
+HTTP request
+前端
+負責主要業務邏輯（除了AI以外的內容，例如：用戶登入）
+Database
+<<database cluster>>
+TimescaleDB<<database cluster>>
+ElasticSearch
+處理快取，包含重複的路徑推測等，避免多次請求agent以及資料庫造成負擔或延遲
+ES儲存agent所需的向量資料以及歷史文本
+TimescaleDB作為postgres插件，負責儲存所有結構化資料以及yolo產生的時序性資料
+Route負責處理路徑預測Explainer負責解釋原因Chat manager負責與窗口互動
+cctv產出路口資訊並交由YOLO計算車流量
+路口資訊如{道路代碼: string,面向方向: string,路口串流URL: string,路口類別: string,刷新率: int32,經度: double,緯度: double}
+YOLO輸出如{道路代碼: string,面向方向: string,路口類別: string,經度: double,緯度: double,平均車輛數: int32,擁擠程度: string,信心程度: float}
+1.2.技術棧
+5
+
+2.資料建模與存儲 
+2.1.ER diagram 
+2.1.1.User & UserProﬁle 
+6
+
+2.1.2.TimescaleDB Hyper-tables
+7
+
+3.API 與介⾯規範 
+3.1.移動端 API 
+功
+能
+分
+類
+請求⽅
+法
+API 窗⼝ 
+(Endpoint)
+請求參數 (Request 
+Body / Params)
+回傳結果 (Response 
+Body) 說明
+⾝
+分
+驗
+證
+POST
+/api/v1/
+auth/
+register
+{ "email": "string", 
+"username": "string", 
+"password_hash": 
+"string" }
+{ "id": "UUID", 
+"message": "Success" }⽤⼾註冊
+⾝
+分
+驗
+證
+POST/api/v1/
+auth/login
+{ "email": "string", 
+"password_hash": 
+"string" }
+{ "token": 
+"JWT_STRING", 
+"user": { "id": "UUID", 
+"role": "string" } }
+登入並取得授
+權
+路
+況
+監
+控
+GET
+/api/v1/
+trafﬁc/
+nodes
+無
+[ { "id": "UUID", "name": 
+"string", "lat": 0.0, "lng": 
+0.0 } ]
+取得路⼝監視
+器清單 
+路
+況
+監
+控
+GET
+/api/v1/
+trafﬁc/{id}/
+current
+id: UUID (Path)
+{ "congestion_score": 
+0.85, "level": "E", 
+"vehicle_count": 45, 
+"timestamp": 
+"ISO-8601" }
+獲取 YOLO 處
+理後的即時路
+況 
+智
+能
+推
+論
+POST
+/api/v1/
+route/
+recommend
+{ "origin": "lat,lng", 
+"destination": "lat,lng", 
+"preferences": "string" }
+{ "route_id": "UUID", 
+"path": 
+"GEOMETRY_STR", 
+"estimated_time": 
+"integer" }
+請求 Route 
+Agent 規劃路
+徑 
+智
+能
+推
+論
+GET
+/api/v1/
+route/{id}/
+explain
+id: UUID (Path)
+{ "reasoning": "string", 
+"forecast_data": 
+{ "trend": 
+"increasing" } }
+結合 Explainer 
+與 Forecast 
+Agent 的推論
+理由 
+智
+能
+對
+話
+POST/api/v1/chat/
+message
+{ "session_id": "UUID", 
+"content": "string" }
+{ "reply": "string", 
+"suggested_actions": 
+[ "list" ] }
+與 Chat 
+Manager 對話 
+資
+料
+同
+步
+GET /api/v1/
+user/sync
+last_sync_time: 
+Long(Query)
+{ "proﬁle": { "nickname": 
+"string", "avatar_url": 
+"string" }, "is_updated": 
+boolean }
+Frontend 同步
+更新 
+8
+3.2.外部對接表  1
+4.業務邏輯和流程分析 
+4.1.Sequence Diagram 
+4.1.1.User registration 
+2
+數據對
+象 來源類型 傳輸協
+議
+更新
+頻率關鍵參數 (Fields) 內部處理邏輯
+CCTV 
+串流/影
+像
+TDX APIHTTPS
+每 
+5~10 
+秒
+camera_id, image_url, 
+timestamp
+由 YOLO Node 抓取影像
+並進⾏物件偵測
+路網靜
+態資料
+外部地圖服
+務
+REST 
+API
+每⽇
+⼀次
+intersection_name, 
+coordinates, road_type
+寫入 TRAFFIC_NODE 
+靜態表作為 LLM 推論基
+礎
+ TDX 資料平台不提供rtsp協議的cctv影像1
+ HTTP status 補充在下表2
+9
+
+		
+4.1.2.User Login
+HTTP 狀
+態碼
+錯誤類型 (Error 
+Type) 回傳 JSON 範例 前端處理建議 (Mobile Side)
+400INVALID_INPUT { "error": "Invalid email 
+format" }
+顯⽰紅⾊警告⽂字於輸入框
+下⽅
+409USER_ALREADY_E
+XISTS
+{ "error": "Email is already 
+taken" }
+導向登入⾴⾯或提⽰找回密
+碼
+429TOO_MANY_REQU
+ESTS
+{ "error": "Rate limit 
+exceeded" }
+實施冷卻計時器，暫時停⽤
+註冊按鈕
+500DATABASE_ERROR{ "error": "Service 
+unavailable" }
+顯⽰「伺服器維護中，請稍
+後再試」
+503NETWORK_TIMEO
+UT { "error": "Timed out" } 提⽰檢查網路連線或⾃動重
+試
+10
+
+4.1.3.Chat Manager 與 LLM 推論流程
+4.1.4.影像處理與資料儲存
+交互組件 協議 / 機制⽬的
+YOLO → 
+Kafka
+Kafka 
+Producer
+實現⾼吞吐量的影像偵測數據解耦，避免 YOLO 處理速度受資
+料庫寫入影響。
+11
+
+5. 非功能性需求與系統安全 (Technical Constraints & 
+Security) 
+	 本章節定義了系統在處理⼤量 YOLO 影像數據與多智能體推論時的安全性與穩定
+性標準。
+5.1.⾝份驗證與授權 (Authentication & Authorization) 
+	 系統採⽤ 無狀態 (Stateless) 的安全架構，以⽀撐分散式叢集需求：
+• JWT (JSON Web Token)：Mobile Client 登入後，Spring Boot 簽發包含 User 
+UUID 與 Role 的 JWT。後續所有 HTTPS 與 gRPC 請求均需攜帶此 Token。
+• OAuth2 / OpenID Connect (預留)：架構圖中 Spring Boot server 可作為 
+Resource Server，未來若對接外部 CCTV 廠商 API 或 Google 登入時，可快速
+擴展 OAuth2 流程。
+• 傳輸安全：所有 Mobile 端與伺服器間的通訊強制使⽤ TLS 1.3 (HTTPS) 加密；
+內部組件（如 Spring Boot 與 Agents 之間）使⽤帶有 SSL 的 gRPC。
+5.2.併發處理與效能 (Concurrency & Performance) 
+	 由於 YOLO 每秒產⽣⼤量事件，系統設計以下機制避免阻塞：
+• 非同步訊息隊列 (Kafka)：YOLO Node 與後端服務徹底解耦。當流量激增時，
+Kafka 作為緩衝區，由 Stream Processor 依據處理能⼒消費數據，確保系統不
+會因瞬間⾼負載崩潰 。
+Kafka → 
+TimescaleD
+B
+TimescaleD
+B Sink
+將時序數據持久化⾄ Hypertable 10，供 Forecast agent 進⾏模
+型訓練與回測。
+Multi-Agent 
+→ gRPC gRPC ⽤於 Route agent 與 Explainer agent 之間的同步請求 ，例如
+請求對特定擁塞路徑的「合理解釋」。
+Kafka → 
+Spring BootConsumer 讓後端主動得知擁塞狀態，以便向 Mobile client 發送 
+WebSocket 或 Push Notiﬁcation 。
+12
+• Redis 分散式鎖 (Locking)：在處理特定路⼝的 TraﬃcCongestionAlert 時，若
+多個 Agent 同時計算同⼀區域，利⽤ Redis 實作分散式鎖，確保針對單⼀事件
+的重算任務（Re-routing）不會重複執⾏。
+• TimescaleDB Hypertable：利⽤時間分區特性，解決傳統 RDBMS 在⼤數據
+量下的索引失效問題，確保 LLM Agent 查詢歷史數據時維持毫秒級回應。
+5.3.監控與⽇誌 (Observability) 
+	 為確保 Multi-agent service 的⾃動化推論可追蹤：
+• 分散式鏈路追蹤 (Distributed Tracing)：導入 OpenTelemetry。當 User 發起
+路徑請求，系統會記錄從 Spring Boot -> Chat Manager -> Route 
+Agent 的完整調⽤鏈路與耗時，便於定位推論延遲。
+• 結構化⽇誌 (Centralized Logging)：所有 Agent 與 YOLO Node 的⽇誌統⼀
+透過 Kafka 傳輸⾄ ELK/Loki 叢集。特別記錄 YOLO 偵測錯誤率與 Agent 推論
+失敗原因。
+• 即時監控⾯板：監控 Kafka 堆積量 (Lag) 與 TimescaleDB 的寫入吞吐量，當 
+YOLO 數據延遲超過 30 秒時⾃動觸發告警。
+6.結論 
+本專案為構建⼀個⾼度整合、可擴展且具備「認知推論」能⼒的智慧交通決策平台。透過 
+Spring Boot 作為核⼼閘道器 ，系統橋接了前端 Kotlin Multiplatform 的流暢體驗與後
+端 YOLO/AI Agents 的強⼤運算⼒ 。
+本設計的關鍵價值在於：
+維度 技術實作 ⽬的
+安全性 JWT + bcrypt 雜湊 保護⽤⼾隱私並確保請求合法性。
+可擴展性 Kafka Broker 叢集 ⽀援未來增加更多 YOLO 偵測節點。
+低延遲 Redis 緩存 快速回應 Mobile 端對熱點路⼝狀態的查詢。
+推論透明度Explainer Agent 讓使⽤者了解 AI 推薦路徑的背後邏輯。
+13
+• 時序數據的深度應⽤：利⽤ TimescaleDB 的 Hypertable 技術 ，將 YOLO 產⽣
+的瞬時流量數據轉化為具備預測價值的時序資產，⽀撐 Forecast Agent 進⾏精準
+的路況預測 。
+• 非同步與解耦的穩定性：藉由 Kafka 叢集 緩衝⼤規模的影像監控事件 ，確保系統
+在⾼負載路況下仍能維持優異的響應速度與數據完整性。
+• 以⼈為本的智能推論：透過 Chat Manager 整合 Route 與 Explainer Agents ，
+將艱澀的交通數據轉化為直觀、具備解釋性的導航建議，顯著提升了終端⽤⼾的信
+任度。
+未來，隨著系統上線與數據積累，本架構可進⼀步導入更複雜的強化學習模型，實現⾃
+動化的交通號誌協同控制，為智慧城市（Smart City）的願景提供實質性的技術⽀撐。
+14

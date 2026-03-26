@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package chat;
+
+option java_package = "com.potato.mainservice.grpc";
+option java_multiple_files = true;
+
+// Shared gRPC service definition for Chat communication
+// between Spring Boot (main-service) and Python (agent-service)
+
+service ChatService {
+  // Send a chat message and get an AI-powered reply
+  rpc SendMessage (ChatRequest) returns (ChatResponse);
+
+  // Health check for connectivity verification
+  rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message ChatRequest {
+  string session_id = 1;
+  string content = 2;
+}
+
+message ChatResponse {
+  string reply = 1;
+  repeated string suggested_actions = 2;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+  string service_name = 2;
+}
