@@ -1,0 +1,54 @@
+# === IDE ===
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Java / Kotlin / Gradle ===
+*.class
+*.jar
+*.war
+*.ear
+build/
+out/
+.gradle/
+!backend/main-service/gradle/wrapper/gradle-wrapper.jar
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+.eggs/
+*.egg
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# === Environment & Secrets ===
+.env
+.env.*
+!.env.example
+
+# === Docker ===
+docker-compose.override.yml
+
+# === Claude Code ===
+.claude/
+
+# === OpenSpec local state ===
+openspec/
+
+# === Misc ===
+*.log
+*.tmp
+*.swp
