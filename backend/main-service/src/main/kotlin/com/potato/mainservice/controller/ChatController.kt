@@ -1,36 +1,44 @@
 package com.potato.mainservice.controller
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.potato.mainservice.domain.ChatMessageRequest
 import com.potato.mainservice.domain.ChatMessageResponse
-import com.potato.mainservice.grpc.ChatServiceGrpc
-import com.potato.mainservice.grpc.ChatRequest
+import com.potato.mainservice.kafka.ChatRequestProducer
+import com.potato.mainservice.kafka.PendingRequestStore
+import org.springframework.http.HttpStatus
+import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
+import java.util.UUID
+import java.util.concurrent.TimeoutException
 
-/**
- * REST controller that bridges HTTP requests to the agent-service via gRPC.
- */
 @RestController
 @RequestMapping("/api/v1/chat")
 class ChatController(
-    private val chatStub: ChatServiceGrpc.ChatServiceBlockingStub,
+    private val chatRequestProducer: ChatRequestProducer,
+    private val pendingRequestStore: PendingRequestStore,
+    private val objectMapper: ObjectMapper,
 ) {
 
-    /**
-     * POST /api/v1/chat/message
-     * Forwards user message to agent-service via gRPC and returns the AI response.
-     */
     @PostMapping("/message", produces = ["application/json;charset=UTF-8"])
-    fun sendMessage(@RequestBody request: ChatMessageRequest): ChatMessageResponse {
-        val grpcRequest = ChatRequest.newBuilder()
-            .setSessionId(request.session_id)
-            .setContent(request.content)
-            .build()
+    fun sendMessage(@RequestBody request: ChatMessageRequest): ResponseEntity<Any> {
+        val correlationId = UUID.randomUUID().toString()
 
-        val grpcResponse = chatStub.sendMessage(grpcRequest)
+        pendingRequestStore.register(correlationId)
+        chatRequestProducer.send(correlationId, request.session_id, request.content)
 
-        return ChatMessageResponse(
-            reply = grpcResponse.reply,
-            suggested_actions = grpcResponse.suggestedActionsList,
-        )
+        return try {
+            val responseJson: String = pendingRequestStore.await(correlationId, 30)
+            val responseMap = objectMapper.readTree(responseJson)
+
+            val response = ChatMessageResponse(
+                reply = responseMap["reply"]?.asText() ?: "",
+                suggested_actions = responseMap["suggested_actions"]
+                    ?.map { it.asText() } ?: emptyList(),
+            )
+            ResponseEntity.ok(response)
+        } catch (e: TimeoutException) {
+            ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT)
+                .body(mapOf("error" to "Multiagent service did not respond within 30 seconds"))
+        }
     }
 }

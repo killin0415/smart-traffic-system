@@ -1,5 +1,5 @@
 [project]
-name = "agent-service"
+name = "multiagent-service"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -9,8 +9,6 @@ dependencies = [
     "confluent-kafka>=2.12.2",
     "elasticsearch>=8.17.0",
     "fastapi>=0.124.0",
-    "grpcio>=1.76.0",
-    "grpcio-tools>=1.71.2",
     "langchain>=1.1.2",
     "mcp>=1.0.0",
     "networkx>=3.4",
@@ -23,4 +21,11 @@ dependencies = [
     "sqlalchemy>=2.0.44",
     "ultralytics>=8.3.235",
     "uvicorn>=0.38.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.25.0",
+    "httpx>=0.28.0",
 ]

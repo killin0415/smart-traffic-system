@@ -9,6 +9,9 @@ server:
 spring:
   application:
     name: main-service
+  docker:
+    compose:
+      enabled: false
 
   kafka:
     bootstrap-servers: localhost:9092
@@ -20,9 +23,3 @@ spring:
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
-
-# gRPC agent-service connection
-grpc:
-  agent-service:
-    host: localhost
-    port: 50051
