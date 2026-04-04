@@ -12,6 +12,12 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d traffic_data"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - traffic-net
 
@@ -21,6 +27,13 @@ services:
     container_name: traffic_cache
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - traffic-net
 
@@ -82,6 +95,7 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
   es_data:
 
 networks:

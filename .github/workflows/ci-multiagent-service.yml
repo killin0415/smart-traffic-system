@@ -17,6 +17,30 @@ jobs:
       run:
         working-directory: backend/multiagent-service
 
+    services:
+      timescaledb:
+        image: timescale/timescaledb:latest-pg14
+        env:
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: secret
+          POSTGRES_DB: traffic_data
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U admin -d traffic_data"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -32,4 +56,7 @@ jobs:
         run: uv sync --all-extras
 
       - name: Run tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://admin:secret@localhost:5432/traffic_data
+          REDIS_URL: redis://localhost:6379
         run: uv run pytest tests/ -v

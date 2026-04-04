@@ -31,6 +31,13 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
 
+    // Database
+    implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+    runtimeOnly("org.postgresql:postgresql")
+
+    // Redis
+    implementation("org.springframework.boot:spring-boot-starter-data-redis")
+
     // Kafka
     implementation("org.springframework.kafka:spring-kafka")
 
