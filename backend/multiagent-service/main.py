@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
 
+from src.db import get_session
+from src.db.seed import seed_road_network
 from src.kafka.consumer import start_kafka_consumer
 
 
@@ -15,12 +17,16 @@ from src.kafka.consumer import start_kafka_consumer
 async def lifespan(app: FastAPI):
     """
     FastAPI lifespan handler.
-    Starts the Kafka consumer alongside the HTTP server.
+    Seeds road network data and starts the Kafka consumer alongside the HTTP server.
     """
     # --- Startup ---
     print("=" * 50)
     print("[Multiagent Service] Starting up...")
     print("=" * 50)
+
+    # Seed road network if DB is empty
+    async for session in get_session():
+        await seed_road_network(session)
 
     # Start Kafka consumer as a background task
     kafka_task = asyncio.create_task(start_kafka_consumer())

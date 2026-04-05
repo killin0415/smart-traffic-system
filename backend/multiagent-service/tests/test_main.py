@@ -1,8 +1,19 @@
 """Unit tests for the FastAPI application endpoints."""
 import pytest
+from unittest.mock import AsyncMock, patch
 from httpx import AsyncClient, ASGITransport
 
 from main import app
+
+
+@pytest.fixture(autouse=True)
+def _mock_lifespan_deps():
+    """Mock external dependencies triggered by the app lifespan."""
+    with (
+        patch("main.seed_road_network", new_callable=AsyncMock),
+        patch("main.start_kafka_consumer", new_callable=AsyncMock),
+    ):
+        yield
 
 
 @pytest.mark.asyncio

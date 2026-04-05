@@ -55,6 +55,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
+      - name: Initialize DB schema
+        env:
+          PGPASSWORD: secret
+        run: |
+          psql -h localhost -U admin -d traffic_data -f ../../infra/init-db/01-init-timescaledb.sql
+          psql -h localhost -U admin -d traffic_data -f ../../infra/init-db/02-road-network-tables.sql
+
       - name: Run tests
         env:
           DATABASE_URL: postgresql+asyncpg://admin:secret@localhost:5432/traffic_data
