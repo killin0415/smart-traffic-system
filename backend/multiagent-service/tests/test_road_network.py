@@ -153,6 +153,12 @@ class TestParseRoadNetwork:
         # RS002: 0.8km / 60kmh
         assert abs(network.edges[1].base_weight - 0.8 / 60) < 1e-9
 
+    def test_edges_carry_tdx_section_id(self):
+        """ParsedEdge 必須保留 TDX 的 RoadSectionID 供 Live 資料 mapping。"""
+        network = parse_road_network(SAMPLE_SECTIONS)
+        assert network.edges[0].tdx_section_id == "RS001"
+        assert network.edges[1].tdx_section_id == "RS002"
+
     def test_haversine_sanity(self):
         """兩點間距離應合理。"""
         a = Coord(22.620, 120.300)

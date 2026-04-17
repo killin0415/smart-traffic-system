@@ -68,14 +68,22 @@ class TestHandleChatRequest:
 
 
 class TestHandleRouteRequest:
-    """Tests for the route request handler."""
+    """Tests for the route request handler.
+
+    The handler now runs real A* against the in-memory RoadGraph. At unit-test
+    time neither the graph nor the event loop are initialised, so we verify the
+    error-path contract; integration testing with a live graph is covered
+    elsewhere (A* has its own unit tests).
+    """
 
     @patch("src.kafka.consumer.publish_message")
     def test_should_publish_to_route_response_topic(self, mock_publish):
         data = {
             "correlation_id": "r1",
-            "origin": "高雄車站",
-            "destination": "駁二藝術特區",
+            "origin_lat": 22.62,
+            "origin_lng": 120.30,
+            "dest_lat": 22.63,
+            "dest_lng": 120.31,
         }
 
         handle_route_request("r1", data)
@@ -84,34 +92,29 @@ class TestHandleRouteRequest:
         assert mock_publish.call_args.kwargs["topic"] == "route.response"
 
     @patch("src.kafka.consumer.publish_message")
-    def test_response_should_contain_route_fields(self, mock_publish):
+    def test_response_always_includes_correlation_id_and_routes(self, mock_publish):
         data = {
             "correlation_id": "r2",
-            "origin": "A",
-            "destination": "B",
+            "origin_lat": 22.62,
+            "origin_lng": 120.30,
+            "dest_lat": 22.63,
+            "dest_lng": 120.31,
         }
 
         handle_route_request("r2", data)
 
         value = mock_publish.call_args.kwargs["value"]
-        assert "correlation_id" in value
-        assert "route_id" in value
-        assert "path" in value
-        assert "estimated_time" in value
+        assert value["correlation_id"] == "r2"
+        assert "routes" in value
 
     @patch("src.kafka.consumer.publish_message")
-    def test_path_should_contain_origin_and_destination(self, mock_publish):
-        data = {
-            "correlation_id": "r3",
-            "origin": "X",
-            "destination": "Y",
-        }
-
-        handle_route_request("r3", data)
+    def test_invalid_payload_reports_error(self, mock_publish):
+        # Missing origin_lat / etc. should not crash the consumer.
+        handle_route_request("r3", {"correlation_id": "r3"})
 
         value = mock_publish.call_args.kwargs["value"]
-        assert "X" in value["path"]
-        assert "Y" in value["path"]
+        assert value["routes"] == []
+        assert "error" in value
 
 
 class TestHandleTrafficMetrics:

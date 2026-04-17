@@ -8,8 +8,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
 
-from src.db import get_session
+from src.agents.routing import RoadGraph
+from src.agents.traffic import run_periodic_refresh
+from src.db import async_session, get_session
 from src.db.seed import seed_road_network
+from src.db.speed_camera import seed_speed_cameras
+from src.kafka import runtime as kafka_runtime
 from src.kafka.consumer import start_kafka_consumer
 
 
@@ -17,19 +21,34 @@ from src.kafka.consumer import start_kafka_consumer
 async def lifespan(app: FastAPI):
     """
     FastAPI lifespan handler.
-    Seeds road network data and starts the Kafka consumer alongside the HTTP server.
+    Seeds data, loads the in-memory RoadGraph, and starts the Kafka consumer.
     """
     # --- Startup ---
     print("=" * 50)
     print("[Multiagent Service] Starting up...")
     print("=" * 50)
 
-    # Seed road network if DB is empty
+    # Seed road network + speed cameras if DB is empty
     async for session in get_session():
         await seed_road_network(session)
+        await seed_speed_cameras(session)
+
+    # Load in-memory RoadGraph for A* routing
+    async with async_session() as session:
+        graph = await RoadGraph.from_db(session)
+
+    # Share runtime with Kafka consumer thread (graph + event loop + session factory)
+    kafka_runtime.set_runtime(
+        graph=graph,
+        loop=asyncio.get_running_loop(),
+        session_factory=async_session,
+    )
 
     # Start Kafka consumer as a background task
     kafka_task = asyncio.create_task(start_kafka_consumer())
+
+    # Periodic TDX Live refresher (best-effort — missing creds degrades gracefully)
+    traffic_task = asyncio.create_task(run_periodic_refresh(graph, async_session))
 
     print("[Multiagent Service] All components started successfully!")
 
@@ -37,11 +56,12 @@ async def lifespan(app: FastAPI):
 
     # --- Shutdown ---
     print("[Multiagent Service] Shutting down...")
-    kafka_task.cancel()
-    try:
-        await kafka_task
-    except asyncio.CancelledError:
-        pass
+    for task in (kafka_task, traffic_task):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     print("[Multiagent Service] Shutdown complete.")
 
 

@@ -8,6 +8,8 @@ import json
 import threading
 from confluent_kafka import Consumer, KafkaError
 
+from src.agents.routing import plan_optimal_route
+from src.kafka import runtime as kafka_runtime
 from src.kafka.producer import publish_message
 
 
@@ -45,23 +47,69 @@ def handle_chat_request(key: str, data: dict):
 
 
 def handle_route_request(key: str, data: dict):
-    """Handle a route request: generate a stub response and produce to route.response."""
+    """Handle a route request by running A* on the in-memory RoadGraph.
+
+    Expected payload fields: origin_lat, origin_lng, dest_lat, dest_lng.
+    """
     correlation_id = data.get("correlation_id", key)
-    origin = data.get("origin", "")
-    destination = data.get("destination", "")
+    try:
+        origin_lat = float(data["origin_lat"])
+        origin_lng = float(data["origin_lng"])
+        dest_lat = float(data["dest_lat"])
+        dest_lng = float(data["dest_lng"])
+    except (KeyError, TypeError, ValueError) as e:
+        publish_message(
+            topic="route.response",
+            key=correlation_id,
+            value={
+                "correlation_id": correlation_id,
+                "error": f"invalid payload: {e}",
+                "routes": [],
+            },
+        )
+        return
 
-    print(f"[Route Handler] origin={origin}, destination={destination}")
+    graph = kafka_runtime.get_graph()
+    loop = kafka_runtime.get_loop()
+    session_factory = kafka_runtime.get_session_factory()
 
-    # TODO: Route Agent with A* algorithm
+    if graph is None or loop is None or session_factory is None:
+        publish_message(
+            topic="route.response",
+            key=correlation_id,
+            value={
+                "correlation_id": correlation_id,
+                "error": "service not ready: graph/runtime uninitialised",
+                "routes": [],
+            },
+        )
+        return
+
+    async def _run() -> dict:
+        async with session_factory() as session:
+            return await plan_optimal_route(
+                session, graph, origin_lat, origin_lng, dest_lat, dest_lng
+            )
+
+    future = asyncio.run_coroutine_threadsafe(_run(), loop)
+    try:
+        result = future.result(timeout=10.0)
+    except Exception as e:
+        publish_message(
+            topic="route.response",
+            key=correlation_id,
+            value={
+                "correlation_id": correlation_id,
+                "error": f"routing failed: {e}",
+                "routes": [],
+            },
+        )
+        return
+
     publish_message(
         topic="route.response",
         key=correlation_id,
-        value={
-            "correlation_id": correlation_id,
-            "route_id": "stub-route-id",
-            "path": f"{origin} -> {destination}",
-            "estimated_time": 15,
-        },
+        value={"correlation_id": correlation_id, **result},
     )
 
 

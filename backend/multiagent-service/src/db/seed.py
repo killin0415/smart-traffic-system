@@ -51,6 +51,7 @@ async def seed_road_network(session: AsyncSession) -> None:
             length_km=e.length_km,
             speed_limit_kmh=e.speed_limit_kmh,
             base_weight=e.base_weight,
+            tdx_section_id=e.tdx_section_id or None,
         )
         for e in network.edges
     ]

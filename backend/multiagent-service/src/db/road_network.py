@@ -36,6 +36,7 @@ class ParsedEdge:
     length_km: float
     speed_limit_kmh: int
     base_weight: float
+    tdx_section_id: str = ""
 
 
 @dataclass
@@ -136,6 +137,7 @@ def parse_road_network(sections: list[dict]) -> ParsedRoadNetwork:
             length_km=length_km,
             speed_limit_kmh=speed_limit if speed_limit and speed_limit > 0 else DEFAULT_SPEED_LIMIT,
             base_weight=bw,
+            tdx_section_id=section.get("RoadSectionID", ""),
         ))
 
     return ParsedRoadNetwork(nodes=nodes, edges=edges)
