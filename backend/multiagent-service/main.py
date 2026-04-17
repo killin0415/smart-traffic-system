@@ -3,10 +3,20 @@ Multiagent Service - Main Entry Point
 Runs FastAPI (HTTP) + Kafka consumer concurrently.
 """
 import asyncio
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 import uvicorn
+
+_env_path = Path(__file__).resolve().parents[2] / ".env"
+if _env_path.exists():
+    for line in _env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
 
 from src.agents.routing import RoadGraph
 from src.agents.traffic import run_periodic_refresh

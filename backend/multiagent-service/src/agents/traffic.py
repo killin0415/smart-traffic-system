@@ -1,10 +1,16 @@
 """
 TDX Live Traffic integration.
 
-Periodically fetches TDX Live Section API data for Kaohsiung, then:
+Periodically fetches TDX Live Section API data, then:
   - Writes each section to Redis under `traffic:section:{tdx_section_id}` (TTL 10 min).
   - Inserts a time-series row into `traffic_history` hypertable.
   - Recomputes congestion_factor and updates the in-memory RoadGraph's edge weights.
+
+Note: TDX's `basic/v2/Road/Traffic/Live/City/{City}` endpoint does NOT list
+Kaohsiung as a supported city (it returns HTTP 400 "is not accepted"). When
+that happens we log once and the refresher degrades to a silent no-op — A*
+routing still works using the base edge weights. VD-based live integration
+for Kaohsiung is tracked as a separate OpenSpec change.
 """
 
 from __future__ import annotations
@@ -27,12 +33,14 @@ from src.db.models import TrafficHistory
 logger = logging.getLogger(__name__)
 
 TDX_AUTH_URL = "https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token"
-TDX_LIVE_SECTION_URL = "https://tdx.transportdata.tw/api/basic/v1/Road/Traffic/Live/Section/City/Kaohsiung"
+TDX_LIVE_SECTION_URL = "https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/Live/City/Kaohsiung"
 
 REDIS_KEY_PREFIX = "traffic:section:"
 REDIS_TTL_SECONDS = 600  # 10 minutes
 
 DEFAULT_REFRESH_INTERVAL_SECONDS = int(os.getenv("TDX_LIVE_REFRESH_SECONDS", "300"))
+
+_unsupported_city_logged = False
 
 
 # ---------- OAuth token ----------
@@ -84,7 +92,11 @@ async def fetch_live_section_data() -> list[dict]:
     """Call TDX Live Section API for Kaohsiung and return a normalised list.
 
     Each item: {"tdx_section_id": str, "travel_speed": float|None, "travel_time": float|None}
+
+    Returns [] if TDX doesn't support this city (HTTP 400 "is not accepted"),
+    logging the reason once.
     """
+    global _unsupported_city_logged
     async with httpx.AsyncClient(timeout=30) as client:
         token = await get_access_token(client)
         response = await client.get(
@@ -92,6 +104,15 @@ async def fetch_live_section_data() -> list[dict]:
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             params={"$format": "JSON"},
         )
+        if response.status_code == 400 and "is not accepted" in response.text:
+            if not _unsupported_city_logged:
+                logger.warning(
+                    "TDX Live City endpoint does not support Kaohsiung — refresher will no-op. "
+                    "Details: %s",
+                    response.text.strip(),
+                )
+                _unsupported_city_logged = True
+            return []
         response.raise_for_status()
         payload = response.json()
 
@@ -101,6 +122,7 @@ async def fetch_live_section_data() -> list[dict]:
             payload.get("LiveTraffics")
             or payload.get("Sections")
             or payload.get("LiveTrafficSections")
+            or payload.get("RoadLiveTraffics")
             or []
         )
     elif isinstance(payload, list):
@@ -257,11 +279,12 @@ async def refresh_traffic_data(session: AsyncSession, graph: RoadGraph) -> dict:
         logger.error("traffic_history insert failed: %s", e)
 
     updated = update_graph_weights(graph, section_data)
-    logger.info(
-        "refresh_traffic_data: %d sections fetched, %d edges updated",
-        len(section_data),
-        updated,
-    )
+    if section_data:
+        logger.info(
+            "refresh_traffic_data: %d sections fetched, %d edges updated",
+            len(section_data),
+            updated,
+        )
     return {"fetched": len(section_data), "updated_edges": updated}
 
 
