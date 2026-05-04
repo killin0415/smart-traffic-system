@@ -23,6 +23,7 @@ from src.agents.traffic import run_periodic_refresh
 from src.db import async_session, get_session
 from src.db.seed import seed_road_network
 from src.db.speed_camera import seed_speed_cameras
+from src.db.vd_sensor import seed_vd_sensors
 from src.kafka import runtime as kafka_runtime
 from src.kafka.consumer import start_kafka_consumer
 
@@ -42,6 +43,7 @@ async def lifespan(app: FastAPI):
     async for session in get_session():
         await seed_road_network(session)
         await seed_speed_cameras(session)
+        await seed_vd_sensors(session)
 
     # Load in-memory RoadGraph for A* routing
     async with async_session() as session:

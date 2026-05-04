@@ -31,6 +31,23 @@ CREATE TABLE IF NOT EXISTS speed_camera (
     nearest_edge_id INTEGER REFERENCES traffic_edge(id)
 );
 
+-- VD (Vehicle Detector) static data
+CREATE TABLE IF NOT EXISTS vd_sensor (
+    id              SERIAL PRIMARY KEY,
+    vdid            VARCHAR(64) NOT NULL UNIQUE,
+    latitude        DOUBLE PRECISION NOT NULL,
+    longitude       DOUBLE PRECISION NOT NULL,
+    link_id         VARCHAR(64),
+    road_section_id VARCHAR(64),
+    nearest_edge_id INTEGER REFERENCES traffic_edge(id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_vd_sensor_vdid
+    ON vd_sensor (vdid);
+
+CREATE INDEX IF NOT EXISTS ix_vd_sensor_nearest_edge_id
+    ON vd_sensor (nearest_edge_id);
+
 -- Live traffic time-series (TimescaleDB hypertable)
 CREATE TABLE IF NOT EXISTS traffic_history (
     time            TIMESTAMPTZ      NOT NULL,

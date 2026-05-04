@@ -1,16 +1,15 @@
 """
-TDX Live Traffic integration.
+TDX Live Traffic integration (VD path).
 
-Periodically fetches TDX Live Section API data, then:
-  - Writes each section to Redis under `traffic:section:{tdx_section_id}` (TTL 10 min).
+Periodically fetches TDX `Live/VD/City/Kaohsiung`, filters out faulty lane
+readings, aggregates per-edge speed via the persisted `vd_sensor` snap, then:
+  - Writes each edge's section data to Redis under `traffic:section:{tdx_section_id}` (TTL 10 min).
   - Inserts a time-series row into `traffic_history` hypertable.
   - Recomputes congestion_factor and updates the in-memory RoadGraph's edge weights.
 
-Note: TDX's `basic/v2/Road/Traffic/Live/City/{City}` endpoint does NOT list
-Kaohsiung as a supported city (it returns HTTP 400 "is not accepted"). When
-that happens we log once and the refresher degrades to a silent no-op — A*
-routing still works using the base edge weights. VD-based live integration
-for Kaohsiung is tracked as a separate OpenSpec change.
+The City Live Section endpoint does not support Kaohsiung, so this service
+relies entirely on the per-VD lane-level live API. VD → edge mapping is
+loaded once from `vd_sensor` and cached for the lifetime of the refresher.
 """
 
 from __future__ import annotations
@@ -23,24 +22,22 @@ import time
 from datetime import datetime, timezone
 
 import httpx
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agents.routing import MAX_CONGESTION_FACTOR, RoadGraph
 from src.cache import redis_client
-from src.db.models import TrafficHistory
+from src.db.models import TrafficEdge, TrafficHistory, VDSensor
 
 logger = logging.getLogger(__name__)
 
 TDX_AUTH_URL = "https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token"
-TDX_LIVE_SECTION_URL = "https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/Live/City/Kaohsiung"
+TDX_LIVE_VD_URL = "https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/Live/VD/City/Kaohsiung"
 
 REDIS_KEY_PREFIX = "traffic:section:"
 REDIS_TTL_SECONDS = 600  # 10 minutes
 
 DEFAULT_REFRESH_INTERVAL_SECONDS = int(os.getenv("TDX_LIVE_REFRESH_SECONDS", "300"))
-
-_unsupported_city_logged = False
 
 
 # ---------- OAuth token ----------
@@ -85,99 +82,168 @@ async def get_access_token(client: httpx.AsyncClient | None = None) -> str:
             await client.aclose()
 
 
-# ---------- Live data fetch ----------
+# ---------- VD Live data fetch ----------
 
 
-async def fetch_live_section_data() -> list[dict]:
-    """Call TDX Live Section API for Kaohsiung and return a normalised list.
+def _filter_healthy(lanes: list[dict]) -> list[float]:
+    """Drop lane readings with `Speed <= 0` or non-empty `ErrorType`."""
+    healthy: list[float] = []
+    for lane in lanes:
+        if not isinstance(lane, dict):
+            continue
+        err = lane.get("ErrorType")
+        if err:
+            continue
+        speed = lane.get("Speed")
+        if speed is None:
+            continue
+        try:
+            sval = float(speed)
+        except (TypeError, ValueError):
+            continue
+        if sval <= 0:
+            continue
+        healthy.append(sval)
+    return healthy
 
-    Each item: {"tdx_section_id": str, "travel_speed": float|None, "travel_time": float|None}
 
-    Returns [] if TDX doesn't support this city (HTTP 400 "is not accepted"),
-    logging the reason once.
-    """
-    global _unsupported_city_logged
+async def fetch_live_vd_data() -> dict[str, list[float]]:
+    """Call TDX VD Live City/Kaohsiung and return `{vdid: [healthy_lane_speeds]}`."""
     async with httpx.AsyncClient(timeout=30) as client:
         token = await get_access_token(client)
         response = await client.get(
-            TDX_LIVE_SECTION_URL,
+            TDX_LIVE_VD_URL,
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             params={"$format": "JSON"},
         )
-        if response.status_code == 400 and "is not accepted" in response.text:
-            if not _unsupported_city_logged:
-                logger.warning(
-                    "TDX Live City endpoint does not support Kaohsiung — refresher will no-op. "
-                    "Details: %s",
-                    response.text.strip(),
-                )
-                _unsupported_city_logged = True
-            return []
         response.raise_for_status()
         payload = response.json()
 
-    # TDX payloads have historically shifted between top-level list and {"LiveTraffics":[...]}; handle both.
     if isinstance(payload, dict):
-        rows = (
-            payload.get("LiveTraffics")
-            or payload.get("Sections")
-            or payload.get("LiveTrafficSections")
-            or payload.get("RoadLiveTraffics")
-            or []
-        )
+        records = payload.get("VDLives") or []
     elif isinstance(payload, list):
-        rows = payload
+        records = payload
     else:
-        rows = []
+        records = []
 
-    normalised: list[dict] = []
-    for row in rows:
-        sid = row.get("SectionID") or row.get("RoadSectionID")
-        if not sid:
+    out: dict[str, list[float]] = {}
+    for record in records:
+        vdid = record.get("VDID")
+        if not vdid:
             continue
-        speed = row.get("TravelSpeed")
-        travel_time = row.get("TravelTime")
-        normalised.append(
-            {
-                "tdx_section_id": str(sid),
-                "travel_speed": float(speed) if speed is not None else None,
-                "travel_time": float(travel_time) if travel_time is not None else None,
-            }
+        speeds: list[float] = []
+        for link_flow in record.get("LinkFlows", []) or []:
+            speeds.extend(_filter_healthy(link_flow.get("Lanes", []) or []))
+        out[str(vdid)] = speeds
+    return out
+
+
+# ---------- Edge-level aggregation ----------
+
+
+async def load_vd_edge_map(session: AsyncSession) -> dict[str, tuple[int, str | None, int]]:
+    """Build `{vdid: (edge_id, tdx_section_id, speed_limit_kmh)}` from `vd_sensor` JOIN `traffic_edge`."""
+    rows = (
+        await session.execute(
+            select(
+                VDSensor.vdid,
+                VDSensor.nearest_edge_id,
+                TrafficEdge.tdx_section_id,
+                TrafficEdge.speed_limit_kmh,
+            )
+            .join(TrafficEdge, VDSensor.nearest_edge_id == TrafficEdge.id)
         )
-    return normalised
+    ).all()
+    return {
+        str(vdid): (int(eid), tsid, int(speed_limit))
+        for vdid, eid, tsid, speed_limit in rows
+        if eid is not None
+    }
+
+
+def aggregate_edge_speeds(
+    vd_data: dict[str, list[float]],
+    edge_vd_map: dict[str, tuple[int, str | None, int]],
+) -> tuple[list[dict], dict[str, int]]:
+    """Average healthy lane speeds across all VDs on the same edge.
+
+    Returns `(section_data, stats)` where:
+      - `section_data` items = `{edge_id, tdx_section_id, speed_limit_kmh, travel_speed}`
+        (only edges with at least one healthy reading)
+      - `stats` = `{"vds_total", "vds_healthy", "edges_updated"}`
+    """
+    per_edge: dict[int, dict] = {}
+    healthy_vd_count = 0
+
+    for vdid, speeds in vd_data.items():
+        mapping = edge_vd_map.get(vdid)
+        if mapping is None or not speeds:
+            continue
+        healthy_vd_count += 1
+        edge_id, tsid, speed_limit = mapping
+        bucket = per_edge.setdefault(
+            edge_id,
+            {
+                "edge_id": edge_id,
+                "tdx_section_id": tsid,
+                "speed_limit_kmh": speed_limit,
+                "_speeds": [],
+            },
+        )
+        bucket["_speeds"].extend(speeds)
+
+    section_data: list[dict] = []
+    for entry in per_edge.values():
+        speeds = entry.pop("_speeds")
+        if not speeds:
+            continue
+        avg = sum(speeds) / len(speeds)
+        entry["travel_speed"] = avg
+        entry["travel_time"] = None
+        section_data.append(entry)
+
+    stats = {
+        "vds_total": len(vd_data),
+        "vds_healthy": healthy_vd_count,
+        "edges_updated": len(section_data),
+    }
+    return section_data, stats
 
 
 # ---------- Redis cache ----------
 
 
 async def update_redis_cache(section_data: list[dict]) -> None:
-    """Write each section's live data to Redis with a 10-min TTL."""
+    """Write each edge's live data to Redis (key = `traffic:section:{tdx_section_id}`)."""
     if not section_data:
         return
     now_iso = datetime.now(timezone.utc).isoformat()
     pipe = redis_client.pipeline()
+    wrote = 0
     for item in section_data:
-        key = f"{REDIS_KEY_PREFIX}{item['tdx_section_id']}"
+        sid = item.get("tdx_section_id")
+        if not sid:
+            continue
+        key = f"{REDIS_KEY_PREFIX}{sid}"
         pipe.set(
             key,
             json.dumps(
                 {
-                    "travel_speed": item["travel_speed"],
-                    "travel_time": item["travel_time"],
+                    "travel_speed": item.get("travel_speed"),
+                    "travel_time": item.get("travel_time"),
                     "updated_at": now_iso,
                 },
                 ensure_ascii=False,
             ),
             ex=REDIS_TTL_SECONDS,
         )
-    await pipe.execute()
+        wrote += 1
+    if wrote:
+        await pipe.execute()
 
 
 async def get_current_traffic(edge_ids: list[int], graph: RoadGraph) -> dict[int, dict]:
-    """Read live traffic info for a set of edges via their tdx_section_id.
-
-    Returns {edge_id: {travel_speed, travel_time, updated_at}} for edges that have data.
-    """
+    """Read live traffic info for a set of edges via their tdx_section_id."""
     out: dict[int, dict] = {}
     if not edge_ids:
         return out
@@ -208,19 +274,19 @@ async def get_current_traffic(edge_ids: list[int], graph: RoadGraph) -> dict[int
 
 
 async def update_timescaledb(session: AsyncSession, section_data: list[dict]) -> None:
-    """Insert a snapshot row per section into traffic_history hypertable."""
-    if not section_data:
-        return
-    now = datetime.now(timezone.utc)
+    """Insert a snapshot row per edge (with non-null tdx_section_id) into traffic_history."""
     rows = [
         {
-            "time": now,
+            "time": datetime.now(timezone.utc),
             "tdx_section_id": item["tdx_section_id"],
-            "travel_speed": item["travel_speed"],
-            "travel_time": item["travel_time"],
+            "travel_speed": item.get("travel_speed"),
+            "travel_time": item.get("travel_time"),
         }
         for item in section_data
+        if item.get("tdx_section_id")
     ]
+    if not rows:
+        return
     await session.execute(insert(TrafficHistory), rows)
     await session.commit()
 
@@ -229,32 +295,25 @@ async def update_timescaledb(session: AsyncSession, section_data: list[dict]) ->
 
 
 def _congestion_factor(speed_limit: int, current_speed: float | None) -> float:
-    """congestion_factor = min(speed_limit / current_speed, MAX).
-
-    current_speed <= 0 → MAX; None → 1.0 (no data ⇒ assume free-flow).
-    """
+    """congestion_factor = min(speed_limit / current_speed, MAX), clamped to [1.0, MAX]."""
     if current_speed is None:
         return 1.0
     if current_speed <= 0:
         return MAX_CONGESTION_FACTOR
     if speed_limit <= 0:
         return 1.0
-    return min(speed_limit / current_speed, MAX_CONGESTION_FACTOR)
+    return max(1.0, min(speed_limit / current_speed, MAX_CONGESTION_FACTOR))
 
 
 def update_graph_weights(graph: RoadGraph, section_data: list[dict]) -> int:
-    """Recompute congestion_factor per section and patch the in-memory graph weights.
-
-    Returns number of edges updated.
-    """
+    """Recompute congestion_factor per edge and patch in-memory graph weights."""
     updated = 0
     for item in section_data:
-        eid = graph.section_to_edge.get(item["tdx_section_id"])
-        if eid is None:
-            logger.debug("no edge mapping for tdx_section_id=%s", item["tdx_section_id"])
+        eid = item.get("edge_id")
+        if eid is None or eid not in graph.edges:
             continue
         edge = graph.edges[eid]
-        factor = _congestion_factor(edge.speed_limit_kmh, item["travel_speed"])
+        factor = _congestion_factor(edge.speed_limit_kmh, item.get("travel_speed"))
         graph.update_weight(eid, factor)
         updated += 1
     return updated
@@ -263,13 +322,27 @@ def update_graph_weights(graph: RoadGraph, section_data: list[dict]) -> int:
 # ---------- Orchestration ----------
 
 
+_edge_map_cache: dict[str, tuple[int, str | None, int]] | None = None
+
+
+async def _get_edge_map(session: AsyncSession) -> dict[str, tuple[int, str | None, int]]:
+    global _edge_map_cache
+    if _edge_map_cache is None:
+        _edge_map_cache = await load_vd_edge_map(session)
+        logger.info("VD edge map loaded: %d VD→edge entries", len(_edge_map_cache))
+    return _edge_map_cache
+
+
 async def refresh_traffic_data(session: AsyncSession, graph: RoadGraph) -> dict:
-    """Fetch live TDX data and propagate it to Redis, TimescaleDB, and graph weights."""
+    """Fetch live VD data and propagate to Redis, TimescaleDB, and graph weights."""
     try:
-        section_data = await fetch_live_section_data()
+        vd_data = await fetch_live_vd_data()
     except Exception as e:
-        logger.error("TDX Live fetch failed: %s — retaining previous Redis cache", e)
+        logger.error("TDX VD Live fetch failed: %s — retaining previous Redis cache", e)
         return {"fetched": 0, "updated_edges": 0, "error": str(e)}
+
+    edge_map = await _get_edge_map(session)
+    section_data, stats = aggregate_edge_speeds(vd_data, edge_map)
 
     await update_redis_cache(section_data)
 
@@ -279,13 +352,17 @@ async def refresh_traffic_data(session: AsyncSession, graph: RoadGraph) -> dict:
         logger.error("traffic_history insert failed: %s", e)
 
     updated = update_graph_weights(graph, section_data)
-    if section_data:
-        logger.info(
-            "refresh_traffic_data: %d sections fetched, %d edges updated",
-            len(section_data),
-            updated,
-        )
-    return {"fetched": len(section_data), "updated_edges": updated}
+    logger.info(
+        "refresh_traffic_data: %d VDs fetched, %d healthy, %d edges updated",
+        stats["vds_total"],
+        stats["vds_healthy"],
+        updated,
+    )
+    return {
+        "fetched": stats["vds_total"],
+        "healthy": stats["vds_healthy"],
+        "updated_edges": updated,
+    }
 
 
 async def run_periodic_refresh(
@@ -293,11 +370,8 @@ async def run_periodic_refresh(
     session_factory,
     interval_seconds: int = DEFAULT_REFRESH_INTERVAL_SECONDS,
 ) -> None:
-    """Background loop: refresh_traffic_data every `interval_seconds`.
-
-    Designed to be started via `asyncio.create_task()` in lifespan.
-    """
-    logger.info("TDX Live refresher starting — interval=%ds", interval_seconds)
+    """Background loop: refresh_traffic_data every `interval_seconds`."""
+    logger.info("TDX Live refresher (VD path) starting — interval=%ds", interval_seconds)
     while True:
         try:
             async with session_factory() as session:
