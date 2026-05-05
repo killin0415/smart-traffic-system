@@ -51,17 +51,3 @@ class TrafficHistory(Base):
     tdx_section_id = Column(String(64), primary_key=True, nullable=False)
     travel_speed = Column(Double)
     travel_time = Column(Double)
-
-
-class VDSensor(Base):
-    __tablename__ = "vd_sensor"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    vdid = Column(String(64), nullable=False, unique=True, index=True)
-    latitude = Column(Double, nullable=False)
-    longitude = Column(Double, nullable=False)
-    link_id = Column(String(64), nullable=True)
-    road_section_id = Column(String(64), nullable=True)
-    nearest_edge_id = Column(Integer, ForeignKey("traffic_edge.id"), nullable=True, index=True)
-
-    nearest_edge = relationship("TrafficEdge", foreign_keys=[nearest_edge_id])

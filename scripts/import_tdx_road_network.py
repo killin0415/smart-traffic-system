@@ -1,8 +1,8 @@
 """
 TDX 路網資料抓取 Script
 
-從 TDX Section API 抓取高雄市的路段資料（含起終點座標、路段長度），
-並從 VD API 補充速限資訊，輸出為 JSON 快照供 multiagent-service seed 使用。
+從 TDX Section API 抓取台北市的路段資料（含起終點座標、路段長度），
+並從 SectionShape API 補充幾何線資訊，輸出為 JSON 快照供 multiagent-service seed 使用。
 
 Usage:
     python import_tdx_road_network.py
@@ -28,14 +28,14 @@ if _env_path.exists():
             os.environ.setdefault(key.strip(), value.strip())
 
 TDX_AUTH_URL = "https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token"
-TDX_SECTION_URL = "https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/Section/City/Kaohsiung"
-TDX_SECTION_SHAPE_URL = "https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/SectionShape/City/Kaohsiung"
+TDX_SECTION_URL = "https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/Section/City/Taipei"
+TDX_SECTION_SHAPE_URL = "https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/SectionShape/City/Taipei"
 
-# 高雄車站為中心，擴大到 ~5km 範圍以取得足夠路段
-BBOX_SW = (22.600, 120.270)  # 西南角 (lat, lng)
-BBOX_NE = (22.660, 120.340)  # 東北角 (lat, lng)
+# 台北車站 (25.0478, 121.5170) 為中心，半徑約 2.2km
+BBOX_SW = (25.0278, 121.4970)  # 西南角 (lat, lng)
+BBOX_NE = (25.0678, 121.5370)  # 東北角 (lat, lng)
 
-OUTPUT_PATH = Path(__file__).resolve().parents[1] / "data" / "kaohsiung_road_sections.json"
+OUTPUT_PATH = Path(__file__).resolve().parents[1] / "data" / "taipei_road_sections.json"
 
 # TDX 免費會員 rate limit 較低，每次請求間隔
 REQUEST_DELAY_SEC = 2
@@ -202,7 +202,7 @@ def main():
     token = get_access_token(client_id, client_secret)
     print("[INFO] 認證成功")
 
-    print("[INFO] 抓取高雄路段資料 (Section API)...")
+    print("[INFO] 抓取台北路段資料 (Section API)...")
     raw_sections = fetch_sections(token)
     print(f"[INFO] 共取得 {len(raw_sections)} 筆原始路段")
 
@@ -226,7 +226,7 @@ def main():
     output = {
         "metadata": {
             "source": "TDX Section + SectionShape API",
-            "city": "Kaohsiung",
+            "city": "Taipei",
             "bounding_box": {
                 "sw": {"latitude": BBOX_SW[0], "longitude": BBOX_SW[1]},
                 "ne": {"latitude": BBOX_NE[0], "longitude": BBOX_NE[1]},

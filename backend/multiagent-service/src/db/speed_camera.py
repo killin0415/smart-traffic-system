@@ -26,6 +26,12 @@ KAOHSIUNG_KEYWORDS = ("高雄市", "高雄")
 # Taiwan's Kaohsiung urban default when the CSV lacks a SpeedLimit column.
 DEFAULT_SPEED_LIMIT_KMH = 50
 
+# Sanity-check threshold: if every camera is further than this from every
+# graph node, assume the CSV is for a different city than the active road
+# network and abort the seed (avoids polluting the table with cameras snapped
+# to nonsense edges — see review finding #4 in taipei-agent-routing).
+CITY_MISMATCH_THRESHOLD_M = 30_000  # 30 km
+
 # When the CSV has a 測照型式 column, keep only rows whose value includes any of
 # these tokens — i.e. speed enforcement (超速, 闖紅燈兼超速). Rows with no such
 # column pass through unfiltered.
@@ -160,6 +166,24 @@ async def seed_speed_cameras(session: AsyncSession, csv_path: Path | None = None
 
     if not edges or not node_coords:
         logger.warning("road network not yet seeded — skipping speed camera seed")
+        return
+
+    # City-mismatch guard: bail out cleanly if the CSV's geographic centre is
+    # nowhere near the active road network (e.g. Kaohsiung CSV against a
+    # Taipei-seeded graph). Sample the first camera to keep this O(N) cheap.
+    sample = cameras[0]
+    sample_coord = Coord(latitude=sample.latitude, longitude=sample.longitude)
+    nearest_node_dist_m = min(
+        haversine_m(sample_coord, Coord(latitude=lat, longitude=lng))
+        for lat, lng in node_coords.values()
+    )
+    if nearest_node_dist_m > CITY_MISMATCH_THRESHOLD_M:
+        logger.warning(
+            "speed_camera CSV appears to be for a different city than the "
+            "active road network (sample camera %.0f km from nearest node) — "
+            "skipping seed to avoid polluting the table with bad snaps.",
+            nearest_node_dist_m / 1000,
+        )
         return
 
     objs = []

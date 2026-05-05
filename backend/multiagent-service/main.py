@@ -18,12 +18,12 @@ if _env_path.exists():
             key, _, value = line.partition("=")
             os.environ.setdefault(key.strip(), value.strip())
 
+from src.agents.chat_agent import build_chat_agent_from_env
 from src.agents.routing import RoadGraph
 from src.agents.traffic import run_periodic_refresh
 from src.db import async_session, get_session
 from src.db.seed import seed_road_network
 from src.db.speed_camera import seed_speed_cameras
-from src.db.vd_sensor import seed_vd_sensors
 from src.kafka import runtime as kafka_runtime
 from src.kafka.consumer import start_kafka_consumer
 
@@ -43,17 +43,20 @@ async def lifespan(app: FastAPI):
     async for session in get_session():
         await seed_road_network(session)
         await seed_speed_cameras(session)
-        await seed_vd_sensors(session)
 
     # Load in-memory RoadGraph for A* routing
     async with async_session() as session:
         graph = await RoadGraph.from_db(session)
 
-    # Share runtime with Kafka consumer thread (graph + event loop + session factory)
+    # Build chat agent (graceful no-op when GEMINI_API_KEY missing).
+    chat_agent = build_chat_agent_from_env()
+
+    # Share runtime with Kafka consumer thread (graph + event loop + session factory + chat agent)
     kafka_runtime.set_runtime(
         graph=graph,
         loop=asyncio.get_running_loop(),
         session_factory=async_session,
+        chat_agent=chat_agent,
     )
 
     # Start Kafka consumer as a background task

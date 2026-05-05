@@ -178,14 +178,8 @@ class TestCongestionFactor:
         # actual == speed_limit -> factor 1.0
         assert abs(_congestion_factor(50, 50) - 1.0) < 1e-9
 
-    def test_zero_speed_returns_max(self):
-        assert _congestion_factor(50, 0) == 10.0
-
-    def test_negative_speed_returns_max(self):
-        assert _congestion_factor(50, -5) == 10.0
-
     def test_no_data_returns_one(self):
-        # None = no live data -> free flow fallback
+        # None = no live data -> free flow fallback (spec D2: -99 sentinels filtered upstream)
         assert _congestion_factor(50, None) == 1.0
 
     def test_factor_capped_at_max(self):

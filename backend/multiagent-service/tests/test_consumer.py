@@ -4,30 +4,34 @@ from unittest.mock import patch, MagicMock
 from src.kafka.consumer import (
     handle_chat_request,
     handle_route_request,
-    handle_traffic_metrics,
     TOPIC_HANDLERS,
-    TOPICS,
 )
 
 
-class TestTopicConfiguration:
-    """Tests for topic and handler configuration."""
+class TestTopicHandlerRegistry:
+    """Handler registry should cover the default subscribe list."""
 
-    def test_topics_list_contains_expected_topics(self):
-        assert "chat.request" in TOPICS
-        assert "route.request" in TOPICS
-        assert "traffic.metrics" in TOPICS
+    def test_chat_request_registered(self):
+        assert "chat.request" in TOPIC_HANDLERS
 
-    def test_topic_handlers_map_all_topics(self):
-        for topic in TOPICS:
-            assert topic in TOPIC_HANDLERS, f"Missing handler for topic: {topic}"
+    def test_route_request_registered(self):
+        assert "route.request" in TOPIC_HANDLERS
+
+    def test_traffic_metrics_not_registered(self):
+        # traffic.metrics removed — graph weights now driven solely by TDX live polling.
+        assert "traffic.metrics" not in TOPIC_HANDLERS
 
 
 class TestHandleChatRequest:
-    """Tests for the chat request handler."""
+    """Chat handler should publish a reply to chat.response.
 
+    Without a chat agent in runtime it falls back to a stub message; the
+    full agent flow is exercised in `test_chat_agent.py`.
+    """
+
+    @patch("src.kafka.consumer.kafka_runtime.get_chat_agent", return_value=None)
     @patch("src.kafka.consumer.publish_message")
-    def test_should_publish_reply_to_chat_response_topic(self, mock_publish):
+    def test_should_publish_reply_to_chat_response_topic(self, mock_publish, _agent):
         data = {
             "correlation_id": "corr-1",
             "session_id": "sess-1",
@@ -37,17 +41,14 @@ class TestHandleChatRequest:
         handle_chat_request("corr-1", data)
 
         mock_publish.assert_called_once()
-        call_kwargs = mock_publish.call_args
-        assert call_kwargs.kwargs["topic"] == "chat.response"
-        assert call_kwargs.kwargs["key"] == "corr-1"
+        call_kwargs = mock_publish.call_args.kwargs
+        assert call_kwargs["topic"] == "chat.response"
+        assert call_kwargs["key"] == "corr-1"
 
+    @patch("src.kafka.consumer.kafka_runtime.get_chat_agent", return_value=None)
     @patch("src.kafka.consumer.publish_message")
-    def test_reply_should_contain_required_fields(self, mock_publish):
-        data = {
-            "correlation_id": "c2",
-            "session_id": "s2",
-            "content": "test message",
-        }
+    def test_reply_should_contain_required_fields(self, mock_publish, _agent):
+        data = {"correlation_id": "c2", "session_id": "s2", "content": "test message"}
 
         handle_chat_request("c2", data)
 
@@ -57,8 +58,9 @@ class TestHandleChatRequest:
         assert "suggested_actions" in value
         assert isinstance(value["suggested_actions"], list)
 
+    @patch("src.kafka.consumer.kafka_runtime.get_chat_agent", return_value=None)
     @patch("src.kafka.consumer.publish_message")
-    def test_uses_key_as_fallback_correlation_id(self, mock_publish):
+    def test_uses_key_as_fallback_correlation_id(self, mock_publish, _agent):
         data = {"session_id": "s1", "content": "hi"}  # no correlation_id
 
         handle_chat_request("fallback-key", data)
@@ -66,24 +68,32 @@ class TestHandleChatRequest:
         value = mock_publish.call_args.kwargs["value"]
         assert value["correlation_id"] == "fallback-key"
 
+    @patch("src.kafka.consumer.kafka_runtime.get_chat_agent", return_value=None)
+    @patch("src.kafka.consumer.publish_message")
+    def test_route_payload_omitted_when_no_route_intent(self, mock_publish, _agent):
+        # Stub agent (None) → no route_payload in the response value.
+        handle_chat_request("c3", {"correlation_id": "c3", "content": "hi"})
+
+        value = mock_publish.call_args.kwargs["value"]
+        assert "route_payload" not in value
+
 
 class TestHandleRouteRequest:
-    """Tests for the route request handler.
+    """Route handler runs A* against the in-memory RoadGraph.
 
-    The handler now runs real A* against the in-memory RoadGraph. At unit-test
-    time neither the graph nor the event loop are initialised, so we verify the
-    error-path contract; integration testing with a live graph is covered
-    elsewhere (A* has its own unit tests).
+    At unit-test time neither the graph nor the event loop are initialised, so
+    we verify the error-path contract; integration testing with a live graph
+    is covered elsewhere (A* has its own unit tests).
     """
 
     @patch("src.kafka.consumer.publish_message")
     def test_should_publish_to_route_response_topic(self, mock_publish):
         data = {
             "correlation_id": "r1",
-            "origin_lat": 22.62,
-            "origin_lng": 120.30,
-            "dest_lat": 22.63,
-            "dest_lng": 120.31,
+            "origin_lat": 25.04,
+            "origin_lng": 121.51,
+            "dest_lat": 25.05,
+            "dest_lng": 121.52,
         }
 
         handle_route_request("r1", data)
@@ -95,10 +105,10 @@ class TestHandleRouteRequest:
     def test_response_always_includes_correlation_id_and_routes(self, mock_publish):
         data = {
             "correlation_id": "r2",
-            "origin_lat": 22.62,
-            "origin_lng": 120.30,
-            "dest_lat": 22.63,
-            "dest_lng": 120.31,
+            "origin_lat": 25.04,
+            "origin_lng": 121.51,
+            "dest_lat": 25.05,
+            "dest_lng": 121.52,
         }
 
         handle_route_request("r2", data)
@@ -115,15 +125,3 @@ class TestHandleRouteRequest:
         value = mock_publish.call_args.kwargs["value"]
         assert value["routes"] == []
         assert "error" in value
-
-
-class TestHandleTrafficMetrics:
-    """Tests for the traffic metrics handler."""
-
-    def test_should_handle_metrics_without_error(self):
-        data = {"vehicle_count": 42, "speed_avg": 30.5}
-        # Should not raise
-        handle_traffic_metrics("key-1", data)
-
-    def test_should_handle_empty_data(self):
-        handle_traffic_metrics("key-2", {})

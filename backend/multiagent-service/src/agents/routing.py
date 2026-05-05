@@ -318,19 +318,29 @@ async def plan_optimal_route(
 ) -> dict:
     """Plan top-K routes from origin to destination, including speed cameras along the way.
 
-    Returns a JSON-serialisable dict: {"routes": [RouteResult-as-dict, ...]}
+    Returns a JSON-serialisable dict matching `RouteResponse` schema:
+    `{"routes": [RouteItem, ...], "error": str | None}`.
     """
+    # Local import to avoid a circular dependency (`routing_tool` imports `plan_optimal_route`).
+    from src.mcp_servers.routing_tool import RouteItem, RouteResponse
+
     if not graph.nodes:
-        return {"routes": [], "error": "road network not loaded"}
+        return RouteResponse(routes=[], error="road network not loaded").model_dump()
 
     start_id = snap_to_graph(origin_lat, origin_lng, graph)
     end_id = snap_to_graph(dest_lat, dest_lng, graph)
     if start_id is None or end_id is None:
-        return {"routes": [], "error": "could not snap origin/destination to graph"}
+        return RouteResponse(
+            routes=[],
+            error="could not snap origin/destination to graph",
+        ).model_dump()
 
     raw_routes = find_top_k_routes(graph, start_id, end_id, k=k)
     if not raw_routes:
-        return {"routes": [], "error": "no path found between origin and destination"}
+        return RouteResponse(
+            routes=[],
+            error="no path found between origin and destination",
+        ).model_dump()
 
     # Aggregate all edge ids, then one DB query to fetch associated speed cameras.
     all_edge_ids = {eid for _, edges, _ in raw_routes for eid in edges}
@@ -352,24 +362,24 @@ async def plan_optimal_route(
                 }
             )
 
-    routes_out: list[dict] = []
+    routes_out: list[RouteItem] = []
     for nodes, edges, cost_hours in raw_routes:
         edge_objs = [graph.edges[eid] for eid in edges]
         road_names = _dedupe_preserve_order([e.road_name for e in edge_objs if e.road_name])
         distance_km = sum(e.length_km for e in edge_objs)
         cameras = [cam for eid in edges for cam in cameras_by_edge.get(eid, [])]
         routes_out.append(
-            {
-                "path": nodes,
-                "edges": edges,
-                "road_names": road_names,
-                "estimated_time_min": round(cost_hours * 60.0, 2),
-                "distance_km": round(distance_km, 3),
-                "speed_cameras": cameras,
-            }
+            RouteItem(
+                path=nodes,
+                edges=edges,
+                road_names=road_names,
+                estimated_time_min=round(cost_hours * 60.0, 2),
+                distance_km=round(distance_km, 3),
+                speed_cameras=cameras,
+            )
         )
 
-    return {"routes": routes_out}
+    return RouteResponse(routes=routes_out).model_dump()
 
 
 def _dedupe_preserve_order(items: list[str]) -> list[str]:

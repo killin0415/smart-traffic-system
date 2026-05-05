@@ -11,8 +11,8 @@ DEFAULT_SPEED_LIMIT = 40  # km/h
 SNAP_TOLERANCE_M = 20.0
 EARTH_RADIUS_KM = 6371.0
 
-# Relative to repo root: data/kaohsiung_road_sections.json
-DEFAULT_JSON_PATH = Path(__file__).resolve().parents[4] / "data" / "kaohsiung_road_sections.json"
+# Relative to repo root: data/taipei_road_sections.json
+DEFAULT_JSON_PATH = Path(__file__).resolve().parents[4] / "data" / "taipei_road_sections.json"
 
 
 @dataclass
