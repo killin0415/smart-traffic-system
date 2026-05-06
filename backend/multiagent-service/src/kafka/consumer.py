@@ -94,7 +94,8 @@ def handle_chat_request(key: str, data: dict):
 def handle_route_request(key: str, data: dict):
     """Handle a route request by running A* on the in-memory RoadGraph.
 
-    Expected payload fields: origin_lat, origin_lng, dest_lat, dest_lng.
+    Expected payload fields: origin_lat, origin_lng, dest_lat, dest_lng,
+    optional user_id (Phase-2 personalization hook).
     """
     correlation_id = data.get("correlation_id", key)
     try:
@@ -114,9 +115,12 @@ def handle_route_request(key: str, data: dict):
         )
         return
 
+    user_id = data.get("user_id")
+
     graph = kafka_runtime.get_graph()
     loop = kafka_runtime.get_loop()
     session_factory = kafka_runtime.get_session_factory()
+    weight_provider = kafka_runtime.get_weight_provider()
 
     if graph is None or loop is None or session_factory is None:
         publish_message(
@@ -133,7 +137,9 @@ def handle_route_request(key: str, data: dict):
     async def _run() -> dict:
         async with session_factory() as session:
             return await plan_optimal_route(
-                session, graph, origin_lat, origin_lng, dest_lat, dest_lng
+                session, graph, weight_provider,
+                origin_lat, origin_lng, dest_lat, dest_lng,
+                user_id=user_id,
             )
 
     future = asyncio.run_coroutine_threadsafe(_run(), loop)

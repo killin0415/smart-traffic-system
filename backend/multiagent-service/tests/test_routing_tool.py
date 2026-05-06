@@ -164,8 +164,11 @@ async def test_plan_route_happy_path_calls_plan_optimal_route(_reset_runtime):
     args, kwargs = mock_plan.await_args
     assert args[0] is fake_session
     assert args[1] is fake_graph
-    assert args[2:6] == (25.0478, 121.5170, 25.0418, 121.5654)
+    # args[2] is the weight_provider (None here; runtime hasn't set it)
+    assert args[2] is None
+    assert args[3:7] == (25.0478, 121.5170, 25.0418, 121.5654)
     assert kwargs["k"] == 2
+    assert kwargs.get("user_id") is None
     assert out == fake_result
 
 

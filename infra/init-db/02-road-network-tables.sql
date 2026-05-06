@@ -1,10 +1,18 @@
--- Road network static tables for A* pathfinding
+-- Road network static tables for A* pathfinding (OSM-derived, PostGIS-backed).
 
 CREATE TABLE IF NOT EXISTS traffic_node (
     id          SERIAL PRIMARY KEY,
     latitude    DOUBLE PRECISION NOT NULL,
-    longitude   DOUBLE PRECISION NOT NULL
+    longitude   DOUBLE PRECISION NOT NULL,
+    geom        geometry(Point, 4326),
+    has_signal  BOOLEAN NOT NULL DEFAULT FALSE
 );
+
+CREATE INDEX IF NOT EXISTS ix_traffic_node_geom
+    ON traffic_node USING GIST (geom);
+
+CREATE INDEX IF NOT EXISTS ix_traffic_node_signal
+    ON traffic_node (has_signal) WHERE has_signal;
 
 CREATE TABLE IF NOT EXISTS traffic_edge (
     id              SERIAL PRIMARY KEY,
@@ -12,13 +20,17 @@ CREATE TABLE IF NOT EXISTS traffic_edge (
     target_node_id  INTEGER NOT NULL REFERENCES traffic_node(id),
     road_name       VARCHAR(255),
     length_km       DOUBLE PRECISION NOT NULL,
-    speed_limit_kmh INTEGER NOT NULL,
-    base_weight     DOUBLE PRECISION NOT NULL,
-    tdx_section_id  VARCHAR(64)
+    road_class      VARCHAR(32),
+    max_speed_kmh   INTEGER,
+    oneway          BOOLEAN NOT NULL DEFAULT FALSE,
+    geom            geometry(LineString, 4326)
 );
 
-CREATE INDEX IF NOT EXISTS ix_traffic_edge_tdx_section_id
-    ON traffic_edge (tdx_section_id);
+CREATE INDEX IF NOT EXISTS ix_traffic_edge_geom
+    ON traffic_edge USING GIST (geom);
+
+CREATE INDEX IF NOT EXISTS ix_traffic_edge_road_class
+    ON traffic_edge (road_class);
 
 -- Speed camera static data
 CREATE TABLE IF NOT EXISTS speed_camera (
@@ -29,20 +41,4 @@ CREATE TABLE IF NOT EXISTS speed_camera (
     speed_limit     INTEGER NOT NULL,
     address         VARCHAR(255),
     nearest_edge_id INTEGER REFERENCES traffic_edge(id)
-);
-
--- Live traffic time-series (TimescaleDB hypertable)
-CREATE TABLE IF NOT EXISTS traffic_history (
-    time            TIMESTAMPTZ      NOT NULL,
-    tdx_section_id  VARCHAR(64)      NOT NULL,
-    travel_speed    DOUBLE PRECISION,
-    travel_time     DOUBLE PRECISION,
-    PRIMARY KEY (time, tdx_section_id)
-);
-
--- Convert to hypertable (idempotent via if_not_exists)
-SELECT create_hypertable(
-    'traffic_history',
-    'time',
-    if_not_exists => TRUE
 );

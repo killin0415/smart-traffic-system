@@ -1,0 +1,4 @@
+-- Enable required PostgreSQL extensions in dependency order.
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS postgis_topology;

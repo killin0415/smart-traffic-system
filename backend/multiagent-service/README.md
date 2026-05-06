@@ -1,8 +1,8 @@
 # multiagent-service
 
 FastAPI + Kafka multi-agent service for the smart-traffic-system capstone.
-Owns A* route planning, TDX live traffic ingestion, and the Gemini chat
-agent that fronts user queries.
+Owns A* route planning, data.taipei VD live traffic + parking ingestion,
+and the DeepSeek chat agent that fronts user queries.
 
 ## Run
 
@@ -20,13 +20,14 @@ The service exposes:
 
 | Var | Purpose | Notes |
 | --- | --- | --- |
-| `TDX_CLIENT_ID` / `TDX_CLIENT_SECRET` | TDX OAuth2 (road network seed + live polling) | Required for any traffic data |
 | `DEEPSEEK_API_KEY` | DeepSeek API key for the chat agent | Optional — missing key triggers fallback stub reply |
 | `DATABASE_URL` | PostgreSQL/TimescaleDB connection | Defaults to `postgresql+asyncpg://admin:secret@localhost:5432/traffic_data` |
 | `KAFKA_BOOTSTRAP_SERVERS` | Kafka brokers | Default `localhost:9092` |
 | `KAFKA_CONSUMER_GROUP` | Consumer group ID | Default `multiagent-service-group` |
 | `KAFKA_SUBSCRIBE_TOPICS` | Comma-separated topic list | Default `chat.request,route.request`. Empty / whitespace falls back to default |
-| `TDX_LIVE_REFRESH_SECONDS` | TDX live polling interval | Default `300` |
+| `VD_REFRESH_SECONDS` | data.taipei VD live polling interval | Default `300` |
+| `PARKING_REFRESH_SECONDS` | data.taipei parking availability polling interval | Default `300` |
+| `SIGNAL_PENALTY_SECONDS` | A* per-traffic-signal stop-wait penalty | Default `20` (≈ 60-90 s cycle × 50% green) |
 | `DEEPSEEK_MODEL` | DeepSeek model id | Default `deepseek-v4-flash` (cheapest tier) |
 | `DEEPSEEK_BASE_URL` | DeepSeek API base URL | Default `https://api.deepseek.com` |
 | `DEEPSEEK_TIMEOUT_SECONDS` | Per-call timeout | Default `30` |

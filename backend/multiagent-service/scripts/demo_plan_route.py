@@ -41,12 +41,13 @@ _load_env()
 # falls outside the 2.2km bbox set by spec D5 / task 2.1, so the road network
 # does not include it. Pick an in-bbox destination here; expand the bbox if a
 # 信義 demo is required in future.
-ORIGIN = (25.0478, 121.5170)
-DEST = (25.0444, 121.5238)
+ORIGIN = (25.0480, 121.5170)
+DEST = (25.0448, 121.5233)
 
 
 async def main():
     from src.agents.routing import RoadGraph
+    from src.agents.weight_provider import TaipeiWeightProvider
     from src.db import async_session
     from src.kafka import runtime as kafka_runtime
     from src.mcp_servers.routing_tool import plan_route
@@ -55,11 +56,18 @@ async def main():
         graph = await RoadGraph.from_db(s)
     print(f"[INFO] RoadGraph: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
 
+    # Without this, every edge weight is 0 (placeholder set by RoadGraph.from_db)
+    # and estimated_time_min collapses to ~0 minutes.
+    weight_provider = TaipeiWeightProvider()
+    await weight_provider.rebuild(async_session)
+    weight_provider.apply_to_graph(graph)
+
     kafka_runtime.set_runtime(
         graph=graph,
         loop=asyncio.get_running_loop(),
         session_factory=async_session,
     )
+    kafka_runtime.set_weight_provider(weight_provider)
 
     result = await plan_route(
         origin_lat=ORIGIN[0],

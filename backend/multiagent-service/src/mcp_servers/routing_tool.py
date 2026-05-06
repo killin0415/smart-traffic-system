@@ -52,6 +52,11 @@ class RouteItem(BaseModel):
         default_factory=list,
         description="Speed camera dicts attached to edges along the route",
     )
+    parking_suggestions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Parking lots within 1 km of destination with >=10 free spaces "
+                    "(only attached to the best route).",
+    )
 
 
 class RouteResponse(BaseModel):
@@ -70,6 +75,7 @@ async def plan_route(
     dest_lat: float,
     dest_lng: float,
     top_k: int = 3,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Plan top-K routes between two GPS points.
 
@@ -86,6 +92,7 @@ async def plan_route(
 
     graph = kafka_runtime.get_graph()
     session_factory = kafka_runtime.get_session_factory()
+    weight_provider = kafka_runtime.get_weight_provider()
     if graph is None or session_factory is None:
         return RouteResponse(
             routes=[],
@@ -96,10 +103,12 @@ async def plan_route(
         result = await plan_optimal_route(
             session,
             graph,
+            weight_provider,
             payload.origin_lat,
             payload.origin_lng,
             payload.dest_lat,
             payload.dest_lng,
+            user_id=user_id,
             k=payload.top_k,
         )
     return result

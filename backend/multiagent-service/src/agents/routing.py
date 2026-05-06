@@ -1,12 +1,17 @@
 """
-A* 路徑規劃引擎。
+A* path planning engine.
 
-啟動時從 DB 載入路網建構 in-memory adjacency dict，提供：
-- RoadGraph: 路網圖結構 + 動態 weight 更新
-- snap_to_graph: GPS 座標對應到最近高 degree node
-- astar: A* 搜尋（haversine/max_speed heuristic）
-- find_top_k_routes: penalty-based top-K
-- plan_optimal_route: 入口函數，包含 snap → top-K → 附帶測速照相機
+Loads the road network from PostGIS-backed `traffic_node` / `traffic_edge`
+tables once at startup, then exposes:
+  - RoadGraph: in-memory adjacency with per-edge dynamic weight (set by a
+    WeightProvider; weights are absolute travel-time hours).
+  - SearchBox + compute_search_bbox: per-request frontier pruning.
+  - astar(graph, start, end, search_box, weight_overrides): with bbox check
+    and per-node `has_signal` stop-wait penalty.
+  - find_top_k_routes: penalty-based top-K (3.0×).
+  - plan_optimal_route: snap origin/dest -> bbox -> top-K -> enrich with
+    speed cameras + parking suggestions.
+  - query_parking_near_destination: PostGIS LATERAL join for nearby parking.
 """
 
 from __future__ import annotations
@@ -14,9 +19,10 @@ from __future__ import annotations
 import heapq
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import SpeedCamera, TrafficEdge, TrafficNode
@@ -26,7 +32,16 @@ logger = logging.getLogger(__name__)
 EARTH_RADIUS_KM = 6371.0
 DEFAULT_TOP_K = 3
 DEFAULT_PENALTY = 3.0
-MAX_CONGESTION_FACTOR = 10.0
+
+# Signal-stop penalty (hours) per traffic_node with has_signal=TRUE that A*
+# routes through. Default 20 s ≈ 60-90 s cycle × ~50% green ratio.
+SIGNAL_PENALTY_SECONDS = float(os.getenv("SIGNAL_PENALTY_SECONDS", "20"))
+SIGNAL_PENALTY_HR = SIGNAL_PENALTY_SECONDS / 3600.0
+
+# Search-bbox tuning.
+DEFAULT_PADDING_RATIO = 0.3
+DEFAULT_MIN_PADDING_KM = 2.0
+RETRY_PADDING_RATIO = 0.6
 
 
 # ---------- Data structures ----------
@@ -37,6 +52,7 @@ class GraphNode:
     id: int
     latitude: float
     longitude: float
+    has_signal: bool = False
 
 
 @dataclass
@@ -46,9 +62,13 @@ class GraphEdge:
     target_node_id: int
     road_name: str
     length_km: float
-    speed_limit_kmh: int
-    base_weight: float
-    tdx_section_id: str | None = None
+    road_class: str | None = None
+    max_speed_kmh: int | None = None
+    oneway: bool = False
+    # Cached endpoint coordinates so WeightProvider can compute midpoint
+    # without another graph lookup.
+    source_lat_lng: tuple[float, float] | None = None
+    target_lat_lng: tuple[float, float] | None = None
 
 
 @dataclass
@@ -59,6 +79,7 @@ class RouteResult:
     estimated_time_min: float
     distance_km: float
     speed_cameras: list[dict] = field(default_factory=list)
+    parking_suggestions: list[dict] = field(default_factory=list)
 
 
 # ---------- Haversine ----------
@@ -73,21 +94,68 @@ def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(h))
 
 
+# ---------- SearchBox ----------
+
+
+@dataclass(frozen=True)
+class SearchBox:
+    lat_min: float
+    lat_max: float
+    lng_min: float
+    lng_max: float
+
+    def contains(self, lat: float, lng: float) -> bool:
+        return (
+            self.lat_min <= lat <= self.lat_max
+            and self.lng_min <= lng <= self.lng_max
+        )
+
+
+def compute_search_bbox(
+    origin_lat: float,
+    origin_lng: float,
+    dest_lat: float,
+    dest_lng: float,
+    padding_ratio: float = DEFAULT_PADDING_RATIO,
+    min_padding_km: float = DEFAULT_MIN_PADDING_KM,
+) -> SearchBox:
+    """Compute a padded bbox around origin+dest for A* frontier pruning.
+
+    padding_km = max(direct_distance_km × padding_ratio, min_padding_km).
+    Lat/lng extents are derived from km via:
+      1° lat ≈ 111.32 km
+      1° lng ≈ 111.32 × cos(lat) km
+    """
+    direct_km = haversine_km(origin_lat, origin_lng, dest_lat, dest_lng)
+    pad_km = max(direct_km * padding_ratio, min_padding_km)
+
+    lat_pad = pad_km / 111.32
+    avg_lat = (origin_lat + dest_lat) / 2.0
+    lng_pad = pad_km / (111.32 * max(math.cos(math.radians(avg_lat)), 1e-6))
+
+    lat_min = min(origin_lat, dest_lat) - lat_pad
+    lat_max = max(origin_lat, dest_lat) + lat_pad
+    lng_min = min(origin_lng, dest_lng) - lng_pad
+    lng_max = max(origin_lng, dest_lng) + lng_pad
+    return SearchBox(lat_min, lat_max, lng_min, lng_max)
+
+
 # ---------- RoadGraph ----------
 
 
 class RoadGraph:
     """In-memory road network graph with dynamic edge weights.
 
-    Adjacency dict format:
-        adjacency[node_id] = [(neighbor_id, edge_id, dynamic_weight), ...]
+    adjacency[node_id] = [(neighbor_id, edge_id, dynamic_weight_hours), ...]
+
+    Initial weights are 0 until WeightProvider.apply_to_graph() runs in
+    the lifespan; A* before that point is undefined behaviour.
     """
 
     def __init__(self) -> None:
         self.nodes: dict[int, GraphNode] = {}
         self.edges: dict[int, GraphEdge] = {}
         self.adjacency: dict[int, list[tuple[int, int, float]]] = {}
-        self.section_to_edge: dict[str, int] = {}
         self.max_speed_kmh: int = 1
 
     @classmethod
@@ -97,63 +165,83 @@ class RoadGraph:
 
         node_rows = (await session.execute(select(TrafficNode))).scalars().all()
         for n in node_rows:
-            graph.nodes[n.id] = GraphNode(id=n.id, latitude=n.latitude, longitude=n.longitude)
+            graph.nodes[n.id] = GraphNode(
+                id=n.id,
+                latitude=n.latitude,
+                longitude=n.longitude,
+                has_signal=bool(n.has_signal),
+            )
 
         edge_rows = (await session.execute(select(TrafficEdge))).scalars().all()
         for e in edge_rows:
+            src = graph.nodes.get(e.source_node_id)
+            tgt = graph.nodes.get(e.target_node_id)
             ge = GraphEdge(
                 id=e.id,
                 source_node_id=e.source_node_id,
                 target_node_id=e.target_node_id,
                 road_name=e.road_name or "",
                 length_km=e.length_km,
-                speed_limit_kmh=e.speed_limit_kmh,
-                base_weight=e.base_weight,
-                tdx_section_id=e.tdx_section_id,
+                road_class=e.road_class,
+                max_speed_kmh=e.max_speed_kmh,
+                oneway=bool(e.oneway),
+                source_lat_lng=(src.latitude, src.longitude) if src else None,
+                target_lat_lng=(tgt.latitude, tgt.longitude) if tgt else None,
             )
             graph.edges[e.id] = ge
-            graph.adjacency.setdefault(e.source_node_id, []).append((e.target_node_id, e.id, e.base_weight))
-            # Treat edges as bidirectional for routing; TDX Section data lacks direction metadata.
-            graph.adjacency.setdefault(e.target_node_id, []).append((e.source_node_id, e.id, e.base_weight))
-            if e.tdx_section_id:
-                graph.section_to_edge[e.tdx_section_id] = e.id
-            if e.speed_limit_kmh and e.speed_limit_kmh > graph.max_speed_kmh:
-                graph.max_speed_kmh = e.speed_limit_kmh
+            # WeightProvider sets the actual weight; placeholder 0 here.
+            graph.adjacency.setdefault(e.source_node_id, []).append(
+                (e.target_node_id, e.id, 0.0)
+            )
+            if not ge.oneway:
+                graph.adjacency.setdefault(e.target_node_id, []).append(
+                    (e.source_node_id, e.id, 0.0)
+                )
+            if e.max_speed_kmh and e.max_speed_kmh > graph.max_speed_kmh:
+                graph.max_speed_kmh = e.max_speed_kmh
 
         # Ensure every node has an adjacency entry (even if isolated).
         for nid in graph.nodes:
             graph.adjacency.setdefault(nid, [])
 
         logger.info(
-            "RoadGraph loaded: %d nodes, %d edges, max_speed=%d km/h",
+            "RoadGraph loaded: %d nodes (%d signal), %d edges, max_speed=%d km/h",
             len(graph.nodes),
+            sum(1 for n in graph.nodes.values() if n.has_signal),
             len(graph.edges),
             graph.max_speed_kmh,
         )
         return graph
 
-    def update_weight(self, edge_id: int, congestion_factor: float) -> None:
-        """Patch dynamic_weight for a single edge on both directions of the adjacency list."""
+    def update_weight(self, edge_id: int, new_weight: float) -> None:
+        """Set the dynamic weight (in hours) of a single edge in adjacency.
+
+        new_weight is absolute (not a factor). Updates both directions when
+        the edge is bidirectional.
+        """
         edge = self.edges.get(edge_id)
         if edge is None:
             return
-        new_weight = edge.base_weight * max(congestion_factor, 1e-6)
-        for u, v in ((edge.source_node_id, edge.target_node_id), (edge.target_node_id, edge.source_node_id)):
+        w = max(float(new_weight), 1e-6)
+        for u, v in (
+            (edge.source_node_id, edge.target_node_id),
+            (edge.target_node_id, edge.source_node_id),
+        ):
             neighbors = self.adjacency.get(u, [])
             for i, (nb, eid, _w) in enumerate(neighbors):
                 if eid == edge_id and nb == v:
-                    neighbors[i] = (nb, eid, new_weight)
+                    neighbors[i] = (nb, eid, w)
                     break
 
     def get_weight(self, edge_id: int) -> float:
-        """Read current dynamic weight of an edge (from adjacency, not base)."""
+        """Read current dynamic weight (hours) of an edge."""
         edge = self.edges.get(edge_id)
         if edge is None:
             return math.inf
         for nb, eid, w in self.adjacency.get(edge.source_node_id, []):
             if eid == edge_id and nb == edge.target_node_id:
                 return w
-        return edge.base_weight
+        return math.inf
 
     def degree(self, node_id: int) -> int:
         return len(self.adjacency.get(node_id, []))
@@ -170,7 +258,6 @@ def snap_to_graph(lat: float, lng: float, graph: RoadGraph, k: int = 3) -> int |
     if not graph.nodes:
         return None
 
-    # Compute distance to every node (O(N); fine for ~thousand nodes).
     distances = [
         (haversine_km(lat, lng, n.latitude, n.longitude), n.id)
         for n in graph.nodes.values()
@@ -178,7 +265,6 @@ def snap_to_graph(lat: float, lng: float, graph: RoadGraph, k: int = 3) -> int |
     distances.sort(key=lambda x: x[0])
     top_k = distances[: max(k, 1)]
 
-    # Highest degree wins; ties -> smaller distance.
     best_id = top_k[0][1]
     best_degree = graph.degree(best_id)
     best_dist = top_k[0][0]
@@ -197,13 +283,16 @@ def astar(
     start_id: int,
     end_id: int,
     weight_overrides: dict[int, float] | None = None,
+    search_box: SearchBox | None = None,
 ) -> tuple[list[int], list[int], float] | None:
-    """A* shortest path.
+    """A* shortest path with optional bbox pruning + signal-stop penalty.
 
-    Heuristic: haversine_km(current, end) / max_speed_kmh  (admissible — underestimates time).
+    Heuristic: haversine_km(current, end) / max_speed_kmh — admissible
+    even with the signal penalty (heuristic still underestimates true cost).
 
     Returns (node_path, edge_path, total_cost_hours) or None if unreachable.
-    `weight_overrides[edge_id]` lets callers apply temporary penalties without mutating graph.
+    `weight_overrides[edge_id]` lets callers apply temporary penalties without
+    mutating graph (used by find_top_k_routes).
     """
     if start_id == end_id:
         return ([start_id], [], 0.0)
@@ -217,11 +306,11 @@ def astar(
         n = graph.nodes[node_id]
         return haversine_km(n.latitude, n.longitude, end_node.latitude, end_node.longitude) / max_speed
 
-    open_heap: list[tuple[float, int, int]] = []  # (f, counter, node_id)
+    open_heap: list[tuple[float, int, int]] = []
     counter = 0
     heapq.heappush(open_heap, (h(start_id), counter, start_id))
 
-    came_from: dict[int, tuple[int, int]] = {}  # node -> (prev_node, edge_id)
+    came_from: dict[int, tuple[int, int]] = {}
     g_score: dict[int, float] = {start_id: 0.0}
 
     while open_heap:
@@ -231,8 +320,16 @@ def astar(
 
         current_g = g_score[current]
         for nb, eid, base_w in graph.adjacency.get(current, []):
-            w = weight_overrides.get(eid, base_w) if weight_overrides else base_w
-            tentative = current_g + w
+            neighbor = graph.nodes.get(nb)
+            if neighbor is None:
+                continue
+            # 9.3 — bbox check first to prune frontier.
+            if search_box is not None and not search_box.contains(neighbor.latitude, neighbor.longitude):
+                continue
+            # 9.3b — signal penalty for has_signal nodes (skip end node).
+            edge_weight = weight_overrides.get(eid, base_w) if weight_overrides else base_w
+            penalty = SIGNAL_PENALTY_HR if (neighbor.has_signal and nb != end_id) else 0.0
+            tentative = current_g + edge_weight + penalty
             if tentative < g_score.get(nb, math.inf):
                 g_score[nb] = tentative
                 came_from[nb] = (current, eid)
@@ -270,38 +367,107 @@ def find_top_k_routes(
     end_id: int,
     k: int = DEFAULT_TOP_K,
     penalty: float = DEFAULT_PENALTY,
+    search_box: SearchBox | None = None,
 ) -> list[tuple[list[int], list[int], float]]:
-    """Penalty-based top-K: after each A* run, multiply used edges' weight by `penalty` and rerun.
-
-    Final cost for each route is re-computed with the ORIGINAL weights, and results are
-    sorted by that real cost ascending. Duplicate paths are filtered.
+    """Penalty-based top-K. After each A* run, multiply used edges' weight by
+    `penalty` and rerun. Final cost is recomputed with the live (unmodified)
+    graph weights. Duplicate paths are filtered.
     """
     overrides: dict[int, float] = {}
     results: list[tuple[list[int], list[int], float]] = []
     seen_edge_sets: set[tuple[int, ...]] = set()
 
     for _ in range(max(k, 1)):
-        result = astar(graph, start_id, end_id, weight_overrides=overrides)
+        result = astar(graph, start_id, end_id, weight_overrides=overrides, search_box=search_box)
         if result is None:
             break
         nodes, edges, _penalized_cost = result
         edge_key = tuple(edges)
         if edge_key in seen_edge_sets:
-            # Penalty didn't produce a different path — no point continuing.
             break
         seen_edge_sets.add(edge_key)
 
-        # Recompute cost with original (or currently live) weights via graph.get_weight.
+        # Real cost from live graph weights (no overrides, no signal penalty).
         real_cost = sum(graph.get_weight(eid) for eid in edges)
         results.append((nodes, edges, real_cost))
 
-        # Penalise all edges used so next iteration picks a different route.
         for eid in edges:
-            base_w = graph.edges[eid].base_weight
+            base_w = graph.get_weight(eid)
             overrides[eid] = overrides.get(eid, base_w) * penalty
 
     results.sort(key=lambda r: r[2])
     return results
+
+
+# ---------- Parking lookup ----------
+
+
+_PARKING_NEAR_QUERY = text(
+    """
+    SELECT
+        pl.id,
+        pl.name,
+        pl.address,
+        pl.latitude,
+        pl.longitude,
+        pa.available_car,
+        ST_Distance(pl.geom::geography, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography) AS distance_m
+    FROM parking_lot pl
+    CROSS JOIN LATERAL (
+        SELECT available_car
+        FROM parking_availability
+        WHERE lot_id = pl.id
+        ORDER BY ts DESC
+        LIMIT 1
+    ) pa
+    WHERE ST_DWithin(
+        pl.geom::geography,
+        ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography,
+        :radius_m
+    )
+      AND pa.available_car IS NOT NULL
+      AND pa.available_car >= :min_avail
+    ORDER BY distance_m ASC
+    LIMIT :top_n
+    """
+)
+
+
+async def query_parking_near_destination(
+    session: AsyncSession,
+    lat: float,
+    lng: float,
+    radius_km: float = 1.0,
+    top: int = 5,
+    min_available: int = 10,
+) -> list[dict]:
+    """Return the nearest parking lots to (lat, lng) with at least
+    `min_available` empty car spaces, ordered by distance ascending.
+    """
+    rows = (
+        await session.execute(
+            _PARKING_NEAR_QUERY,
+            {
+                "lat": lat,
+                "lng": lng,
+                "radius_m": radius_km * 1000,
+                "min_avail": min_available,
+                "top_n": top,
+            },
+        )
+    ).all()
+    return [
+        {
+            "id": r.id,
+            "name": r.name,
+            "address": r.address,
+            "latitude": r.latitude,
+            "longitude": r.longitude,
+            "available_car": int(r.available_car),
+            "distance_m": round(float(r.distance_m), 1),
+        }
+        for r in rows
+    ]
 
 
 # ---------- Entry point ----------
@@ -310,22 +476,32 @@ def find_top_k_routes(
 async def plan_optimal_route(
     session: AsyncSession,
     graph: RoadGraph,
+    weight_provider,
     origin_lat: float,
     origin_lng: float,
     dest_lat: float,
     dest_lng: float,
+    user_id: str | None = None,  # Phase-2 personalization hook
     k: int = DEFAULT_TOP_K,
 ) -> dict:
-    """Plan top-K routes from origin to destination, including speed cameras along the way.
+    """Plan top-K routes from origin to destination.
 
     Returns a JSON-serialisable dict matching `RouteResponse` schema:
     `{"routes": [RouteItem, ...], "error": str | None}`.
+
+    `weight_provider` is reserved for future per-request reweighting (e.g.
+    avoid-tolls overrides). Phase 1 trusts the latest WeightProvider state
+    already applied to the graph.
+    `user_id` is reserved for PersonalizedWeightProvider; Phase 1 ignores it.
     """
-    # Local import to avoid a circular dependency (`routing_tool` imports `plan_optimal_route`).
     from src.mcp_servers.routing_tool import RouteItem, RouteResponse
+
+    _ = weight_provider, user_id  # accepted, unused in phase 1
 
     if not graph.nodes:
         return RouteResponse(routes=[], error="road network not loaded").model_dump()
+
+    bbox = compute_search_bbox(origin_lat, origin_lng, dest_lat, dest_lng)
 
     start_id = snap_to_graph(origin_lat, origin_lng, graph)
     end_id = snap_to_graph(dest_lat, dest_lng, graph)
@@ -335,14 +511,22 @@ async def plan_optimal_route(
             error="could not snap origin/destination to graph",
         ).model_dump()
 
-    raw_routes = find_top_k_routes(graph, start_id, end_id, k=k)
+    raw_routes = find_top_k_routes(graph, start_id, end_id, k=k, search_box=bbox)
+    if not raw_routes:
+        # Retry once with a wider bbox.
+        bbox = compute_search_bbox(
+            origin_lat, origin_lng, dest_lat, dest_lng,
+            padding_ratio=RETRY_PADDING_RATIO,
+        )
+        raw_routes = find_top_k_routes(graph, start_id, end_id, k=k, search_box=bbox)
+
     if not raw_routes:
         return RouteResponse(
             routes=[],
             error="no path found between origin and destination",
         ).model_dump()
 
-    # Aggregate all edge ids, then one DB query to fetch associated speed cameras.
+    # Aggregate edges -> one DB query for cameras.
     all_edge_ids = {eid for _, edges, _ in raw_routes for eid in edges}
     cameras_by_edge: dict[int, list[dict]] = {}
     if all_edge_ids:
@@ -362,8 +546,17 @@ async def plan_optimal_route(
                 }
             )
 
+    # Parking suggestions only attach to the best route.
+    try:
+        parking_suggestions = await query_parking_near_destination(
+            session, dest_lat, dest_lng,
+        )
+    except Exception as exc:
+        logger.warning("query_parking_near_destination failed: %s", exc)
+        parking_suggestions = []
+
     routes_out: list[RouteItem] = []
-    for nodes, edges, cost_hours in raw_routes:
+    for idx, (nodes, edges, cost_hours) in enumerate(raw_routes):
         edge_objs = [graph.edges[eid] for eid in edges]
         road_names = _dedupe_preserve_order([e.road_name for e in edge_objs if e.road_name])
         distance_km = sum(e.length_km for e in edge_objs)
@@ -376,6 +569,7 @@ async def plan_optimal_route(
                 estimated_time_min=round(cost_hours * 60.0, 2),
                 distance_km=round(distance_km, 3),
                 speed_cameras=cameras,
+                parking_suggestions=parking_suggestions if idx == 0 else [],
             )
         )
 

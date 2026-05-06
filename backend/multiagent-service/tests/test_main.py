@@ -10,8 +10,13 @@ from main import app
 def _mock_lifespan_deps():
     """Mock external dependencies triggered by the app lifespan."""
     with (
-        patch("main.seed_road_network", new_callable=AsyncMock),
+        patch("main.seed_speed_cameras", new_callable=AsyncMock),
+        patch("main.seed_parking_lots", new_callable=AsyncMock),
+        patch("main.RoadGraph.from_db", new_callable=AsyncMock),
         patch("main.start_kafka_consumer", new_callable=AsyncMock),
+        patch("main.run_periodic_vd_refresh", new_callable=AsyncMock),
+        patch("main.run_periodic_parking_refresh", new_callable=AsyncMock),
+        patch("main.TaipeiWeightProvider"),
     ):
         yield
 
