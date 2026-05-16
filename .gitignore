@@ -45,9 +45,6 @@ docker-compose.override.yml
 # === Claude Code ===
 .claude/
 
-# === OpenSpec local state ===
-openspec/
-
 # === Misc ===
 *.log
 *.tmp
