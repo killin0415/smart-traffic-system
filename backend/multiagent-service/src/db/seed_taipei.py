@@ -52,11 +52,23 @@ async def fetch_parking_lots() -> list[dict]:
         response = await client.get(PARKING_STATIC_URL)
         response.raise_for_status()
         payload = response.json()
-    results = (
-        payload.get("result", {}).get("results")
-        or payload.get("results")
-        or []
-    )
+    # data.taipei is inconsistent across datasets: top level may be
+    #   • a list of rows directly (current shape for this dataset, observed 2026-05),
+    #   • {"result": {"results": [...]}} (legacy CKAN wrapper),
+    #   • {"result": [...]}, or
+    #   • {"results": [...]}.
+    if isinstance(payload, list):
+        results = payload
+    elif isinstance(payload, dict):
+        result_block = payload.get("result")
+        if isinstance(result_block, dict):
+            results = result_block.get("results") or []
+        elif isinstance(result_block, list):
+            results = result_block
+        else:
+            results = payload.get("results") or []
+    else:
+        results = []
     return results if isinstance(results, list) else []
 
 
@@ -72,8 +84,13 @@ async def seed_parking_lots(session: AsyncSession) -> None:
 
     try:
         lots = await fetch_parking_lots()
-    except Exception as exc:
+    except httpx.HTTPError as exc:
         logger.warning("parking_lot seed failed (network): %s — service continues", exc)
+        return
+    except Exception as exc:
+        logger.warning(
+            "parking_lot seed failed (parse): %s — service continues", exc
+        )
         return
 
     rows: list[dict] = []

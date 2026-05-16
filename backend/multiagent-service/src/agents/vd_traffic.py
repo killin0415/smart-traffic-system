@@ -1,13 +1,17 @@
-"""
-data.taipei VD (Vehicle Detector) live integration.
+"""TDX VD (Vehicle Detector) live integration.
 
-Source: https://tcgbusfs.blob.core.windows.net/blobtisv/GetVDDATA.xml
-Format: plain XML (NOT gzipped), 5-min update cycle, no auth, no API key.
+Source: https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/Live/VD/City/Taipei
+Format: JSON, 5-min update cycle, OAuth2 client_credentials.
 Each cycle:
-  1. fetch_vd_dynamic() -> list[VDReading]
+  1. fetch_vd_dynamic() -> list[VDLaneReading]
   2. INSERT into vd_reading hypertable with ON CONFLICT DO NOTHING
   3. await weight_provider.rebuild()
   4. weight_provider.apply_to_graph(graph)
+
+Historical note: an earlier implementation pointed at the data.taipei blob
+`tcgbusfs.blob.core.windows.net/blobtisv/GetVDDATA.xml`, which has been stale
+since 2024-11. TDX Live VD/City/Taipei now provides ~85% live coverage of
+the same VDID space.
 """
 
 from __future__ import annotations
@@ -15,14 +19,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 import httpx
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from src.agents.tdx_client import get_access_token
 from src.db.models import VDReading
 
 if TYPE_CHECKING:
@@ -31,7 +35,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-VD_DYNAMIC_URL = "https://tcgbusfs.blob.core.windows.net/blobtisv/GetVDDATA.xml"
+VD_LIVE_URL = (
+    "https://tdx.transportdata.tw/api/basic/v2/Road/Traffic/Live/VD/City/Taipei"
+    "?$format=JSON"
+)
 
 DEFAULT_REFRESH_INTERVAL_SECONDS = int(os.getenv("VD_REFRESH_SECONDS", "300"))
 
@@ -48,134 +55,130 @@ class VDLaneReading:
     occupancy: float | None
 
 
-# ---------- XML parser ----------
+# ---------- JSON parser ----------
 
 
-def _strip_ns(tag: str) -> str:
-    """Strip XML namespace prefix from a tag (e.g. '{ns}VDLive' -> 'VDLive')."""
-    if "}" in tag:
-        return tag.split("}", 1)[1]
-    return tag
-
-
-def _find_text(elem: ET.Element, name: str) -> str | None:
-    for child in elem.iter():
-        if _strip_ns(child.tag) == name:
-            return (child.text or "").strip() or None
-    return None
-
-
-def _to_float(s: str | None) -> float | None:
-    if s is None:
+def _non_negative_float(v: Any) -> float | None:
+    """TDX uses -99 / -1 sentinels for "no data"; collapse them to None."""
+    if v is None:
         return None
     try:
-        v = float(s)
+        f = float(v)
     except (TypeError, ValueError):
         return None
-    # data.taipei often uses -99 / -1 sentinels for "no data".
-    if v < 0:
+    if f < 0:
         return None
-    return v
+    return f
 
 
-def _to_int(s: str | None) -> int | None:
-    if s is None:
+def _non_negative_int(v: Any) -> int | None:
+    if v is None:
         return None
     try:
-        v = int(float(s))
+        i = int(float(v))
     except (TypeError, ValueError):
         return None
-    if v < 0:
+    if i < 0:
         return None
-    return v
+    return i
 
 
-def parse_vd_dynamic_xml(xml_text: str) -> list[VDLaneReading]:
-    """Parse the GetVDDATA.xml body into a list of per-lane readings.
+def parse_vd_live_json(payload: dict) -> list[VDLaneReading]:
+    """Parse TDX VDLive JSON into a list of per-lane readings.
 
     Schema (relevant nodes):
-        <VDLiveList>
-          <VDLive>
-            <VDID>VLRJL00</VDID>
-            <DataCollectTime>2026-05-07T13:55:00+08:00</DataCollectTime>
-            <LinkFlows>
-              <LinkFlow>
-                <Lanes>
-                  <Lane>
-                    <LaneID>0</LaneID>
-                    <Speed>42.0</Speed>
-                    <Occupancy>14</Occupancy>
-                    <Vehicles>...</Vehicles> (optional aggregate)
-                  </Lane>
-                </Lanes>
-              </LinkFlow>
-            </LinkFlows>
-          </VDLive>
-        </VDLiveList>
+        {
+          "UpdateTime": "...",
+          "VDLives": [
+            {
+              "VDID": "V0111C0",
+              "DataCollectTime": "2026-05-17T00:05:00+08:00",
+              "Status": 0,
+              "LinkFlows": [
+                {
+                  "LinkID": "...",
+                  "Lanes": [
+                    {
+                      "LaneID": 0,
+                      "Speed": 80.0,
+                      "Occupancy": 3.0,
+                      "Vehicles": [{"VehicleType": "S", "Volume": 10, ...}, ...]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
 
-    The parser is namespace-tolerant (strips XML namespaces) and resilient to
-    missing inner fields; rows without VDID or DataCollectTime are skipped.
+    Rows missing VDID or DataCollectTime are skipped. Volume is summed across
+    vehicle types per lane.
     """
-    if not xml_text:
+    if not isinstance(payload, dict):
         return []
 
-    root = ET.fromstring(xml_text)
     readings: list[VDLaneReading] = []
 
-    for vd_elem in root.iter():
-        if _strip_ns(vd_elem.tag) != "VDLive":
+    for vd in payload.get("VDLives") or []:
+        if not isinstance(vd, dict):
             continue
-
-        vdid = _find_text(vd_elem, "VDID")
-        ts_raw = _find_text(vd_elem, "DataCollectTime")
+        vdid = vd.get("VDID")
+        ts_raw = vd.get("DataCollectTime")
         if not vdid or not ts_raw:
             continue
 
         try:
             ts = datetime.fromisoformat(ts_raw)
-        except ValueError:
-            # Non-ISO format; fallback to "now" so we don't lose the row.
+        except (TypeError, ValueError):
             ts = datetime.now(timezone.utc)
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
 
-        for lane_elem in vd_elem.iter():
-            if _strip_ns(lane_elem.tag) != "Lane":
+        for lf in vd.get("LinkFlows") or []:
+            if not isinstance(lf, dict):
                 continue
+            for lane in lf.get("Lanes") or []:
+                if not isinstance(lane, dict):
+                    continue
 
-            lane_id_raw = _find_text(lane_elem, "LaneID")
-            try:
-                lane_no = int(lane_id_raw) if lane_id_raw is not None else 0
-            except ValueError:
-                lane_no = 0
+                lane_id_raw = lane.get("LaneID")
+                try:
+                    lane_no = int(lane_id_raw) if lane_id_raw is not None else 0
+                except (TypeError, ValueError):
+                    lane_no = 0
 
-            speed = _to_float(_find_text(lane_elem, "Speed"))
-            occupancy = _to_float(_find_text(lane_elem, "Occupancy"))
+                speed = _non_negative_float(lane.get("Speed"))
+                occupancy = _non_negative_float(lane.get("Occupancy"))
 
-            # Volume can show up as <Volume> directly or summed from <Vehicles><Vehicle><Volume>.
-            volume = _to_int(_find_text(lane_elem, "Volume"))
-            if volume is None:
-                vol_sum = 0
-                got = False
-                for veh in lane_elem.iter():
-                    if _strip_ns(veh.tag) == "Volume":
-                        v = _to_int(veh.text)
+                # Volume: prefer summed Vehicles[].Volume; fall back to a flat
+                # Volume field if the upstream schema is degraded.
+                volume: int | None = None
+                vehicles = lane.get("Vehicles")
+                if isinstance(vehicles, list) and vehicles:
+                    total = 0
+                    got = False
+                    for veh in vehicles:
+                        if not isinstance(veh, dict):
+                            continue
+                        v = _non_negative_int(veh.get("Volume"))
                         if v is not None:
-                            vol_sum += v
+                            total += v
                             got = True
-                if got:
-                    volume = vol_sum
+                    if got:
+                        volume = total
+                else:
+                    volume = _non_negative_int(lane.get("Volume"))
 
-            readings.append(
-                VDLaneReading(
-                    ts=ts,
-                    vdid=vdid,
-                    lane_no=lane_no,
-                    avg_speed=speed,
-                    volume=volume,
-                    occupancy=occupancy,
+                readings.append(
+                    VDLaneReading(
+                        ts=ts,
+                        vdid=vdid,
+                        lane_no=lane_no,
+                        avg_speed=speed,
+                        volume=volume,
+                        occupancy=occupancy,
+                    )
                 )
-            )
 
     return readings
 
@@ -185,16 +188,17 @@ def parse_vd_dynamic_xml(xml_text: str) -> list[VDLaneReading]:
 
 async def fetch_vd_dynamic(
     client: httpx.AsyncClient | None = None,
-    url: str = VD_DYNAMIC_URL,
+    url: str = VD_LIVE_URL,
 ) -> list[VDLaneReading]:
-    """GET the dynamic VD XML and parse it into per-lane readings."""
+    """GET the TDX Live VD JSON and parse it into per-lane readings."""
     owns_client = client is None
     if owns_client:
         client = httpx.AsyncClient(timeout=30)
     try:
-        response = await client.get(url)
+        token = await get_access_token(client)
+        response = await client.get(url, headers={"Authorization": f"Bearer {token}"})
         response.raise_for_status()
-        return parse_vd_dynamic_xml(response.text)
+        return parse_vd_live_json(response.json())
     finally:
         if owns_client:
             await client.aclose()

@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-from src.agents import vd_traffic
+from src.agents import tdx_client, vd_traffic
 from src.agents.vd_traffic import (
     VDLaneReading,
     fetch_vd_dynamic,
     insert_vd_readings,
-    parse_vd_dynamic_xml,
+    parse_vd_live_json,
     refresh_vd_cycle,
     run_periodic_vd_refresh,
 )
@@ -24,80 +23,70 @@ from src.agents.vd_traffic import (
 # ---------- Fixtures ----------
 
 
-SAMPLE_XML_PLAIN = """<?xml version='1.0' encoding='UTF-8'?>
-<VDLiveList>
-  <VDLive>
-    <VDID>VLRJL00</VDID>
-    <DataCollectTime>2026-05-07T13:55:00+08:00</DataCollectTime>
-    <LinkFlows>
-      <LinkFlow>
-        <Lanes>
-          <Lane>
-            <LaneID>0</LaneID>
-            <Speed>42.5</Speed>
-            <Occupancy>14</Occupancy>
-            <Volume>120</Volume>
-          </Lane>
-          <Lane>
-            <LaneID>1</LaneID>
-            <Speed>-99</Speed>
-            <Occupancy>-1</Occupancy>
-            <Volume>0</Volume>
-          </Lane>
-        </Lanes>
-      </LinkFlow>
-    </LinkFlows>
-  </VDLive>
-  <VDLive>
-    <VDID>VLRJL01</VDID>
-    <DataCollectTime>2026-05-07T13:55:00+08:00</DataCollectTime>
-    <LinkFlows>
-      <LinkFlow>
-        <Lanes>
-          <Lane>
-            <LaneID>0</LaneID>
-            <Speed>30.0</Speed>
-            <Occupancy>20</Occupancy>
-            <Volume>80</Volume>
-          </Lane>
-        </Lanes>
-      </LinkFlow>
-    </LinkFlows>
-  </VDLive>
-</VDLiveList>
-"""
-
-
-SAMPLE_XML_NAMESPACED = """<?xml version='1.0' encoding='UTF-8'?>
-<VDLiveList xmlns="http://traffic.transportdata.tw/standard/traffic/schema/">
-  <VDLive>
-    <VDID>VNS001</VDID>
-    <DataCollectTime>2026-05-07T13:55:00+08:00</DataCollectTime>
-    <LinkFlows>
-      <LinkFlow>
-        <Lanes>
-          <Lane>
-            <LaneID>2</LaneID>
-            <Speed>55.0</Speed>
-            <Occupancy>10</Occupancy>
-            <Volume>200</Volume>
-          </Lane>
-        </Lanes>
-      </LinkFlow>
-    </LinkFlows>
-  </VDLive>
-</VDLiveList>
-"""
+SAMPLE_PAYLOAD = {
+    "UpdateTime": "2026-05-17T00:06:54+08:00",
+    "VDLives": [
+        {
+            "VDID": "VLRJL00",
+            "DataCollectTime": "2026-05-07T13:55:00+08:00",
+            "Status": 0,
+            "LinkFlows": [
+                {
+                    "LinkID": "2000200000000A",
+                    "Lanes": [
+                        {
+                            "LaneID": 0,
+                            "Speed": 42.5,
+                            "Occupancy": 14,
+                            "Vehicles": [
+                                {"VehicleType": "S", "Volume": 100},
+                                {"VehicleType": "M", "Volume": 20},
+                            ],
+                        },
+                        {
+                            "LaneID": 1,
+                            # -99 / -1 are TDX "no data" sentinels.
+                            "Speed": -99,
+                            "Occupancy": -1,
+                            "Vehicles": [
+                                {"VehicleType": "S", "Volume": 0},
+                            ],
+                        },
+                    ],
+                }
+            ],
+        },
+        {
+            "VDID": "VLRJL01",
+            "DataCollectTime": "2026-05-07T13:55:00+08:00",
+            "Status": 0,
+            "LinkFlows": [
+                {
+                    "LinkID": "X",
+                    "Lanes": [
+                        {
+                            "LaneID": 0,
+                            "Speed": 30.0,
+                            "Occupancy": 20.0,
+                            "Vehicles": [
+                                {"VehicleType": "S", "Volume": 80},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    ],
+}
 
 
 # ---------- Parser tests ----------
 
 
-class TestParseVDDynamicXML:
-    def test_parses_plain_xml_with_multiple_lanes_and_sentinel(self):
-        readings = parse_vd_dynamic_xml(SAMPLE_XML_PLAIN)
+class TestParseVDLiveJSON:
+    def test_parses_payload_with_multiple_lanes_and_sentinel(self):
+        readings = parse_vd_live_json(SAMPLE_PAYLOAD)
 
-        # 2 VDLive rows: one with 2 lanes, one with 1 lane → 3 readings.
         assert len(readings) == 3
 
         first = readings[0]
@@ -107,11 +96,10 @@ class TestParseVDDynamicXML:
         assert isinstance(first.lane_no, int)
         assert first.avg_speed == 42.5
         assert first.occupancy == 14.0
+        # Volume summed across vehicle types: 100 + 20 = 120.
         assert first.volume == 120
-        # Timezone-aware datetime expected.
         assert first.ts.tzinfo is not None
 
-        # Sentinel -99 / -1 must collapse to None.
         sentinel_lane = readings[1]
         assert sentinel_lane.vdid == "VLRJL00"
         assert sentinel_lane.lane_no == 1
@@ -125,54 +113,76 @@ class TestParseVDDynamicXML:
         assert third.lane_no == 0
         assert third.avg_speed == 30.0
 
-    def test_empty_string_returns_empty_list(self):
-        assert parse_vd_dynamic_xml("") == []
+    def test_empty_dict_returns_empty_list(self):
+        assert parse_vd_live_json({}) == []
 
-    def test_malformed_xml_raises_parse_error(self):
-        with pytest.raises(ET.ParseError):
-            parse_vd_dynamic_xml("<not-valid><<<")
-
-    def test_namespaced_xml_is_parsed(self):
-        readings = parse_vd_dynamic_xml(SAMPLE_XML_NAMESPACED)
-        assert len(readings) == 1
-        r = readings[0]
-        assert r.vdid == "VNS001"
-        assert r.lane_no == 2
-        assert r.avg_speed == 55.0
-        assert r.volume == 200
+    def test_none_payload_returns_empty_list(self):
+        assert parse_vd_live_json(None) == []  # type: ignore[arg-type]
 
     def test_row_missing_vdid_or_ts_is_skipped(self):
-        xml_text = """<?xml version='1.0' encoding='UTF-8'?>
-<VDLiveList>
-  <VDLive>
-    <DataCollectTime>2026-05-07T13:55:00+08:00</DataCollectTime>
-    <LinkFlows><LinkFlow><Lanes><Lane><LaneID>0</LaneID><Speed>30</Speed></Lane></Lanes></LinkFlow></LinkFlows>
-  </VDLive>
-  <VDLive>
-    <VDID>OK01</VDID>
-    <DataCollectTime>2026-05-07T13:55:00+08:00</DataCollectTime>
-    <LinkFlows><LinkFlow><Lanes><Lane><LaneID>0</LaneID><Speed>20</Speed></Lane></Lanes></LinkFlow></LinkFlows>
-  </VDLive>
-</VDLiveList>
-"""
-        readings = parse_vd_dynamic_xml(xml_text)
+        payload = {
+            "VDLives": [
+                {
+                    # Missing VDID → skipped.
+                    "DataCollectTime": "2026-05-07T13:55:00+08:00",
+                    "LinkFlows": [{"Lanes": [{"LaneID": 0, "Speed": 30}]}],
+                },
+                {
+                    "VDID": "OK01",
+                    "DataCollectTime": "2026-05-07T13:55:00+08:00",
+                    "LinkFlows": [{"Lanes": [{"LaneID": 0, "Speed": 20}]}],
+                },
+            ]
+        }
+        readings = parse_vd_live_json(payload)
         assert len(readings) == 1
         assert readings[0].vdid == "OK01"
+
+    def test_falls_back_to_flat_volume_when_vehicles_missing(self):
+        payload = {
+            "VDLives": [
+                {
+                    "VDID": "X",
+                    "DataCollectTime": "2026-05-07T13:55:00+08:00",
+                    "LinkFlows": [
+                        {
+                            "Lanes": [
+                                {"LaneID": 0, "Speed": 60.0, "Occupancy": 5, "Volume": 88}
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+        readings = parse_vd_live_json(payload)
+        assert len(readings) == 1
+        assert readings[0].volume == 88
 
 
 # ---------- HTTP fetch tests ----------
 
 
 class TestFetchVDDynamic:
+    @pytest.fixture(autouse=True)
+    def _stub_token(self, monkeypatch):
+        """All fetch tests run against a stub access token to skip OAuth."""
+        monkeypatch.setattr(
+            vd_traffic, "get_access_token", AsyncMock(return_value="fake-token")
+        )
+
     @pytest.mark.asyncio
     async def test_fetch_uses_mock_transport_and_returns_parsed_list(self):
+        captured = {}
+
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, text=SAMPLE_XML_PLAIN)
+            captured["auth"] = request.headers.get("Authorization")
+            return httpx.Response(200, json=SAMPLE_PAYLOAD)
 
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
-            readings = await fetch_vd_dynamic(client=client, url="http://test.local/VD.xml")
+            readings = await fetch_vd_dynamic(client=client, url="http://test.local/VD")
 
+        assert captured["auth"] == "Bearer fake-token"
         assert len(readings) == 3
         assert readings[0].vdid == "VLRJL00"
 
@@ -184,35 +194,7 @@ class TestFetchVDDynamic:
         transport = httpx.MockTransport(handler)
         async with httpx.AsyncClient(transport=transport) as client:
             with pytest.raises(httpx.HTTPStatusError):
-                await fetch_vd_dynamic(client=client, url="http://test.local/VD.xml")
-
-    @pytest.mark.asyncio
-    async def test_fetch_creates_and_closes_own_client_when_none_passed(self):
-        """When no client is passed, fetch should construct + close one of its own."""
-        captured = {}
-
-        class _FakeAsyncClient:
-            def __init__(self, *args, **kwargs):
-                captured["constructed"] = True
-                self.closed = False
-
-            async def get(self, url):
-                captured["url"] = url
-                # Bind a request to the response so raise_for_status() works.
-                req = httpx.Request("GET", url)
-                return httpx.Response(200, text=SAMPLE_XML_PLAIN, request=req)
-
-            async def aclose(self):
-                self.closed = True
-                captured["closed"] = True
-
-        with patch.object(vd_traffic.httpx, "AsyncClient", _FakeAsyncClient):
-            readings = await fetch_vd_dynamic(url="http://test.local/VD.xml")
-
-        assert captured.get("constructed") is True
-        assert captured.get("closed") is True
-        assert captured.get("url") == "http://test.local/VD.xml"
-        assert len(readings) == 3
+                await fetch_vd_dynamic(client=client, url="http://test.local/VD")
 
 
 # ---------- DB write tests ----------
@@ -262,7 +244,6 @@ class TestInsertVDReadings:
         session.execute.assert_awaited_once()
         session.commit.assert_awaited_once()
 
-        # Verify it's a pg_insert ON CONFLICT DO NOTHING statement.
         called_stmt = session.execute.await_args.args[0]
         rendered = str(called_stmt)
         assert "INSERT INTO vd_reading" in rendered
@@ -310,7 +291,6 @@ class TestRefreshVDCycle:
         assert result["fetched"] == 0
         weight_provider.rebuild.assert_not_called()
         weight_provider.apply_to_graph.assert_not_called()
-        # Session factory must not be invoked when fetch failed.
         session_factory.assert_not_called()
 
     @pytest.mark.asyncio
@@ -329,7 +309,6 @@ class TestRefreshVDCycle:
         assert result == {"fetched": 0, "inserted": 0}
         weight_provider.rebuild.assert_awaited_once_with(session_factory)
         weight_provider.apply_to_graph.assert_called_once_with(graph)
-        # Empty readings → no insert path → session factory should NOT be opened.
         session_factory.assert_not_called()
 
     @pytest.mark.asyncio
@@ -370,14 +349,11 @@ class TestRefreshVDCycle:
 class TestRunPeriodicVDRefresh:
     @pytest.mark.asyncio
     async def test_loops_multiple_cycles_then_cancels_cleanly(self):
-        """Verify the loop runs at least 2 cycles, swallows a single cycle exception,
-        and re-raises CancelledError when cancelled."""
         call_count = {"n": 0}
         two_cycles_done = asyncio.Event()
 
         async def _fake_cycle(graph, weight_provider, session_factory):
             call_count["n"] += 1
-            # First cycle raises — the loop must survive and keep going.
             if call_count["n"] == 1:
                 raise RuntimeError("boom (this should be swallowed)")
             if call_count["n"] >= 2:
@@ -389,8 +365,6 @@ class TestRunPeriodicVDRefresh:
                 run_periodic_vd_refresh(MagicMock(), MagicMock(), MagicMock(), interval_seconds=0)
             )
             try:
-                # interval_seconds=0 → real asyncio.sleep(0) just yields to the loop,
-                # which keeps the spin tight.
                 await asyncio.wait_for(two_cycles_done.wait(), timeout=2.0)
             finally:
                 task.cancel()
@@ -398,3 +372,42 @@ class TestRunPeriodicVDRefresh:
                     await task
 
             assert call_count["n"] >= 2, f"expected >= 2 cycles, got {call_count['n']}"
+
+
+# ---------- TDX OAuth client tests ----------
+
+
+class TestTdxClient:
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self, monkeypatch):
+        tdx_client.reset_token_cache()
+        monkeypatch.setenv("TDX_CLIENT_ID", "cid")
+        monkeypatch.setenv("TDX_CLIENT_SECRET", "csec")
+        yield
+        tdx_client.reset_token_cache()
+
+    @pytest.mark.asyncio
+    async def test_fetches_token_and_caches(self):
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(
+                200, json={"access_token": "tok-123", "expires_in": 3600}
+            )
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            t1 = await tdx_client.get_access_token(client)
+            t2 = await tdx_client.get_access_token(client)
+
+        assert t1 == "tok-123"
+        assert t2 == "tok-123"
+        assert calls["n"] == 1, "second call should hit cache, not the network"
+
+    @pytest.mark.asyncio
+    async def test_raises_when_credentials_missing(self, monkeypatch):
+        monkeypatch.delenv("TDX_CLIENT_ID", raising=False)
+        monkeypatch.delenv("TDX_CLIENT_SECRET", raising=False)
+        with pytest.raises(RuntimeError, match="TDX_CLIENT_ID"):
+            await tdx_client.get_access_token()

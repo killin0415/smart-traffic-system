@@ -65,7 +65,35 @@ services:
     networks:
       - traffic-net
 
-  # --- 4. (選用) Kafka 管理介面: UI for Apache Kafka ---
+  # --- 4. Kafka topic bootstrapper ---
+  # One-shot container that waits for Kafka to be ready and creates the
+  # 6 application topics used by main-service ↔ multiagent-service so that
+  # consumers don't spam UNKNOWN_TOPIC_OR_PART on first boot.
+  kafka-init:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka-init
+    depends_on:
+      - kafka
+    networks:
+      - traffic-net
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "
+      echo 'kafka-init: waiting for broker...';
+      for i in $$(seq 1 60); do
+        kafka-broker-api-versions --bootstrap-server kafka:29092 >/dev/null 2>&1 && break;
+        sleep 2;
+      done;
+      echo 'kafka-init: creating topics...';
+      for t in chat.request chat.response route.request route.response traffic.metrics traffic.alerts; do
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic $$t --partitions 1 --replication-factor 1;
+      done;
+      echo 'kafka-init: topic list:';
+      kafka-topics --bootstrap-server kafka:29092 --list;
+      "
+
+  # --- 5. (選用) Kafka 管理介面: UI for Apache Kafka ---
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
@@ -79,7 +107,7 @@ services:
     networks:
       - traffic-net
 
-  # --- 5. 向量/全文搜尋: ElasticSearch ---
+  # --- 6. 向量/全文搜尋: ElasticSearch ---
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
     container_name: traffic_es
