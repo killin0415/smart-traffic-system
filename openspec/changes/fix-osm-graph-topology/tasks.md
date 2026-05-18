@@ -82,5 +82,5 @@
 
 - [x] 10.1 更新 memory `routing_algorithm.md`：把過期的 `traffic.py` / `road_network.py` file pointer 刪除（這兩個檔 c8136ba 之後就不存在），補上 `vd_traffic.py` / `weight_provider.py` 的真實位置與三層 tier 簡述
 - [x] 10.2 更新 memory `eta_accuracy_followup.md`：紀錄 graph topology 修好後可重新 benchmark ETA 與 Google Maps 差距
-- [ ] 10.3 commit SQL / Python 改動為一個 commit；§10.1 / §10.2 的 memory 更新另開獨立 commit（避免 revert SQL 時誤動 memory）
-- [ ] 10.4 push develop branch
+- [x] 10.3 commit SQL / Python 改動為一個 commit；§10.1 / §10.2 的 memory 更新另開獨立 commit（避免 revert SQL 時誤動 memory）
+- [x] 10.4 push develop branch
