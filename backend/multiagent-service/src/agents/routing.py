@@ -3,14 +3,16 @@ A* path planning engine.
 
 Loads the road network from PostGIS-backed `traffic_node` / `traffic_edge`
 tables once at startup, then exposes:
-  - RoadGraph: in-memory adjacency with per-edge dynamic weight (set by a
-    WeightProvider; weights are absolute travel-time hours).
+  - RoadGraph: in-memory forward + reverse adjacency with per-edge dynamic
+    weight (set by a WeightProvider; weights are absolute travel-time hours).
+    Reverse adjacency mirrors forward and is rebuilt with it; reverse-BFS uses
+    it without re-scanning all edges per request.
   - SearchBox + compute_search_bbox: per-request frontier pruning.
   - astar(graph, start, end, search_box, weight_overrides): with bbox check
     and per-node `has_signal` stop-wait penalty.
   - find_top_k_routes: penalty-based top-K (3.0×).
-  - plan_optimal_route: snap origin/dest -> bbox -> top-K -> enrich with
-    speed cameras + parking suggestions.
+  - plan_optimal_route: snap origin/dest with reachability fallback -> bbox
+    -> top-K -> enrich with speed cameras + parking suggestions.
   - query_parking_near_destination: PostGIS LATERAL join for nearby parking.
 """
 
@@ -42,6 +44,16 @@ SIGNAL_PENALTY_HR = SIGNAL_PENALTY_SECONDS / 3600.0
 DEFAULT_PADDING_RATIO = 0.3
 DEFAULT_MIN_PADDING_KM = 2.0
 RETRY_PADDING_RATIO = 0.6
+
+# Snap-with-reachability tuning. The floor (100) keeps the post-contraction
+# Taipei graph (~30-50k nodes) at a meaningful min-reach threshold; the
+# `nodes // 1000` term scales up for larger maps. Tests monkeypatch the
+# module-level constant to lower it for tiny synthetic graphs.
+REACHABILITY_MIN_NODES_FLOOR = 100
+REACHABILITY_MAX_HOPS = 1000
+REACHABILITY_MAX_VISITED = 5000
+SNAP_FALLBACK_CANDIDATES = 5
+SNAP_TOP_K = 15
 
 
 # ---------- Data structures ----------
@@ -147,6 +159,13 @@ class RoadGraph:
     """In-memory road network graph with dynamic edge weights.
 
     adjacency[node_id] = [(neighbor_id, edge_id, dynamic_weight_hours), ...]
+    reverse_adjacency[node_id] = [(predecessor_id, edge_id, weight_hours), ...]
+
+    Reverse adjacency is built once at load time so per-request incoming
+    reachability checks don't have to re-scan every edge. Each non-oneway
+    street now lives as TWO separate `traffic_edge` rows (one per direction)
+    courtesy of the SQL rebuild, so each edge_id appears exactly once in
+    forward adjacency (at its source) and once in reverse (at its target).
 
     Initial weights are 0 until WeightProvider.apply_to_graph() runs in
     the lifespan; A* before that point is undefined behaviour.
@@ -156,6 +175,7 @@ class RoadGraph:
         self.nodes: dict[int, GraphNode] = {}
         self.edges: dict[int, GraphEdge] = {}
         self.adjacency: dict[int, list[tuple[int, int, float]]] = {}
+        self.reverse_adjacency: dict[int, list[tuple[int, int, float]]] = {}
         self.max_speed_kmh: int = 1
 
     @classmethod
@@ -189,20 +209,24 @@ class RoadGraph:
                 target_lat_lng=(tgt.latitude, tgt.longitude) if tgt else None,
             )
             graph.edges[e.id] = ge
-            # WeightProvider sets the actual weight; placeholder 0 here.
+            # Forward adjacency only: the SQL rebuild emits a separate
+            # traffic_edge row per direction for non-oneway streets, so we
+            # MUST NOT mirror the entry here (doing so would double-count).
             graph.adjacency.setdefault(e.source_node_id, []).append(
                 (e.target_node_id, e.id, 0.0)
             )
-            if not ge.oneway:
-                graph.adjacency.setdefault(e.target_node_id, []).append(
-                    (e.source_node_id, e.id, 0.0)
-                )
             if e.max_speed_kmh and e.max_speed_kmh > graph.max_speed_kmh:
                 graph.max_speed_kmh = e.max_speed_kmh
 
-        # Ensure every node has an adjacency entry (even if isolated).
+        # Ensure every node has both adjacency entries (even if isolated).
         for nid in graph.nodes:
             graph.adjacency.setdefault(nid, [])
+            graph.reverse_adjacency.setdefault(nid, [])
+
+        # Build reverse adjacency from the just-built forward dict (O(E)).
+        for u, neighbors in graph.adjacency.items():
+            for v, eid, w in neighbors:
+                graph.reverse_adjacency.setdefault(v, []).append((u, eid, w))
 
         logger.info(
             "RoadGraph loaded: %d nodes (%d signal), %d edges, max_speed=%d km/h",
@@ -214,24 +238,29 @@ class RoadGraph:
         return graph
 
     def update_weight(self, edge_id: int, new_weight: float) -> None:
-        """Set the dynamic weight (in hours) of a single edge in adjacency.
+        """Set the dynamic weight (in hours) of a single edge.
 
-        new_weight is absolute (not a factor). Updates both directions when
-        the edge is bidirectional.
+        Updates the single forward entry in `adjacency[source]` and the
+        single reverse entry in `reverse_adjacency[target]`. With the SQL
+        rebuild, each direction of a bidirectional street has its own
+        edge_id, so each id appears exactly once in each dict.
         """
         edge = self.edges.get(edge_id)
         if edge is None:
             return
         w = max(float(new_weight), 1e-6)
-        for u, v in (
-            (edge.source_node_id, edge.target_node_id),
-            (edge.target_node_id, edge.source_node_id),
-        ):
-            neighbors = self.adjacency.get(u, [])
-            for i, (nb, eid, _w) in enumerate(neighbors):
-                if eid == edge_id and nb == v:
-                    neighbors[i] = (nb, eid, w)
-                    break
+
+        forward = self.adjacency.get(edge.source_node_id, [])
+        for i, (nb, eid, _w) in enumerate(forward):
+            if eid == edge_id and nb == edge.target_node_id:
+                forward[i] = (nb, eid, w)
+                break
+
+        reverse = self.reverse_adjacency.get(edge.target_node_id, [])
+        for i, (nb, eid, _w) in enumerate(reverse):
+            if eid == edge_id and nb == edge.source_node_id:
+                reverse[i] = (nb, eid, w)
+                break
 
     def get_weight(self, edge_id: int) -> float:
         """Read current dynamic weight (hours) of an edge."""
@@ -244,19 +273,39 @@ class RoadGraph:
         return math.inf
 
     def degree(self, node_id: int) -> int:
-        return len(self.adjacency.get(node_id, []))
+        """Undirected degree — distinct neighbours via outgoing OR incoming
+        edges. Used by `snap_to_graph` to prefer real intersections; counting
+        only outgoing would skip oneway-sink nodes that ARE legitimate
+        intersections.
+        """
+        nbrs: set[int] = set()
+        for nb, _eid, _w in self.adjacency.get(node_id, []):
+            nbrs.add(nb)
+        for nb, _eid, _w in self.reverse_adjacency.get(node_id, []):
+            nbrs.add(nb)
+        return len(nbrs)
 
 
 # ---------- Snap to graph ----------
 
 
-def snap_to_graph(lat: float, lng: float, graph: RoadGraph, k: int = 3) -> int | None:
-    """Find nearest K nodes, return the one with highest degree.
+def snap_to_graph(
+    lat: float,
+    lng: float,
+    graph: RoadGraph,
+    k: int = SNAP_TOP_K,
+    return_top_n: int = 1,
+) -> int | list[int] | None:
+    """Find the nearest K nodes, ranked by degree-desc then distance-asc.
 
-    Ties on degree break by smaller distance.
+    Return type is determined by `return_top_n`:
+      - return_top_n == 1 (default) -> `int | None` (the best single node)
+      - return_top_n >= 2           -> `list[int]` (up to N best nodes,
+        truncated when graph has fewer nodes than requested; empty list
+        when graph is empty)
     """
     if not graph.nodes:
-        return None
+        return [] if return_top_n >= 2 else None
 
     distances = [
         (haversine_km(lat, lng, n.latitude, n.longitude), n.id)
@@ -265,14 +314,92 @@ def snap_to_graph(lat: float, lng: float, graph: RoadGraph, k: int = 3) -> int |
     distances.sort(key=lambda x: x[0])
     top_k = distances[: max(k, 1)]
 
-    best_id = top_k[0][1]
-    best_degree = graph.degree(best_id)
-    best_dist = top_k[0][0]
-    for dist, nid in top_k[1:]:
-        d = graph.degree(nid)
-        if d > best_degree or (d == best_degree and dist < best_dist):
-            best_id, best_degree, best_dist = nid, d, dist
-    return best_id
+    ranked = sorted(top_k, key=lambda x: (-graph.degree(x[1]), x[0]))
+
+    if return_top_n >= 2:
+        return [nid for _, nid in ranked[:return_top_n]]
+    return ranked[0][1]
+
+
+# ---------- Reachability helpers ----------
+
+
+def _has_outgoing_reach(graph: RoadGraph, node_id: int, min_reach: int) -> bool:
+    """Limited forward BFS — is there a path out of `node_id` to >= `min_reach`
+    other nodes? Capped at REACHABILITY_MAX_HOPS hops and REACHABILITY_MAX_VISITED
+    nodes; returns True as soon as the threshold is crossed.
+    """
+    if node_id not in graph.adjacency:
+        return False
+    visited: set[int] = {node_id}
+    frontier: list[int] = [node_id]
+    hops = 0
+    while frontier:
+        if hops >= REACHABILITY_MAX_HOPS or len(visited) >= REACHABILITY_MAX_VISITED:
+            break
+        next_frontier: list[int] = []
+        for u in frontier:
+            for nb, _eid, _w in graph.adjacency.get(u, []):
+                if nb in visited:
+                    continue
+                visited.add(nb)
+                if len(visited) - 1 >= min_reach:
+                    return True
+                next_frontier.append(nb)
+        frontier = next_frontier
+        hops += 1
+    return len(visited) - 1 >= min_reach
+
+
+def _has_incoming_reach(graph: RoadGraph, node_id: int, min_reach: int) -> bool:
+    """Mirror of `_has_outgoing_reach` over `reverse_adjacency` — is there a
+    path INTO `node_id` from >= `min_reach` other nodes?"""
+    if node_id not in graph.reverse_adjacency:
+        return False
+    visited: set[int] = {node_id}
+    frontier: list[int] = [node_id]
+    hops = 0
+    while frontier:
+        if hops >= REACHABILITY_MAX_HOPS or len(visited) >= REACHABILITY_MAX_VISITED:
+            break
+        next_frontier: list[int] = []
+        for u in frontier:
+            for nb, _eid, _w in graph.reverse_adjacency.get(u, []):
+                if nb in visited:
+                    continue
+                visited.add(nb)
+                if len(visited) - 1 >= min_reach:
+                    return True
+                next_frontier.append(nb)
+        frontier = next_frontier
+        hops += 1
+    return len(visited) - 1 >= min_reach
+
+
+def _pick_reachable_candidate(
+    graph: RoadGraph,
+    candidates: list[int],
+    min_reach: int,
+    direction: str,
+    coord: tuple[float, float],
+) -> int:
+    """Walk candidates in order, return the first one whose reach >= min_reach.
+
+    Falls back to candidates[0] if none pass, logging a warning (degraded
+    behaviour — A* still gets to try, BFS is a cheap heuristic that can
+    misjudge edge cases).
+    """
+    probe = _has_outgoing_reach if direction == "outgoing" else _has_incoming_reach
+    for c in candidates:
+        if probe(graph, c, min_reach):
+            return c
+    degrees = [(c, graph.degree(c)) for c in candidates]
+    logger.warning(
+        "snap-with-reachability: all %d candidates failed %s-reach for "
+        "(%.5f, %.5f); falling back to first. candidates=%s",
+        len(candidates), direction, coord[0], coord[1], degrees,
+    )
+    return candidates[0]
 
 
 # ---------- A* ----------
@@ -503,13 +630,35 @@ async def plan_optimal_route(
 
     bbox = compute_search_bbox(origin_lat, origin_lng, dest_lat, dest_lng)
 
-    start_id = snap_to_graph(origin_lat, origin_lng, graph)
-    end_id = snap_to_graph(dest_lat, dest_lng, graph)
-    if start_id is None or end_id is None:
+    # Snap-with-reachability: pull top 5 candidates per endpoint and pick the
+    # first one that actually reaches into / out of the main graph.
+    reach_min = max(REACHABILITY_MIN_NODES_FLOOR, len(graph.nodes) // 1000)
+    skip_reach = len(graph.nodes) < reach_min
+
+    origin_candidates = snap_to_graph(
+        origin_lat, origin_lng, graph, return_top_n=SNAP_FALLBACK_CANDIDATES,
+    )
+    dest_candidates = snap_to_graph(
+        dest_lat, dest_lng, graph, return_top_n=SNAP_FALLBACK_CANDIDATES,
+    )
+    if not origin_candidates or not dest_candidates:
         return RouteResponse(
             routes=[],
             error="could not snap origin/destination to graph",
         ).model_dump()
+
+    if skip_reach:
+        start_id = origin_candidates[0]
+        end_id = dest_candidates[0]
+    else:
+        start_id = _pick_reachable_candidate(
+            graph, origin_candidates, reach_min,
+            direction="outgoing", coord=(origin_lat, origin_lng),
+        )
+        end_id = _pick_reachable_candidate(
+            graph, dest_candidates, reach_min,
+            direction="incoming", coord=(dest_lat, dest_lng),
+        )
 
     raw_routes = find_top_k_routes(graph, start_id, end_id, k=k, search_box=bbox)
     if not raw_routes:
