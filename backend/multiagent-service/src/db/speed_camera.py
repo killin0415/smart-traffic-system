@@ -34,7 +34,7 @@ DEFAULT_SPEED_LIMIT_KMH = 50
 # Single-flavour fixed-column mapping (data.taipei).
 _LAT_KEYS = ("緯度",)
 _LNG_KEYS = ("經度",)
-_SPEED_LIMIT_KEYS = ("速限",)
+_SPEED_LIMIT_KEYS = ("速限", "速限-速度限制")
 _DIRECTION_KEYS = ("拍攝方向",)
 _ADDRESS_KEYS = ("設置地點",)
 

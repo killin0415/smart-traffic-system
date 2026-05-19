@@ -30,61 +30,117 @@ def _patch_httpx(monkeypatch, handler):
 
 
 @pytest.mark.asyncio
-async def test_geocode_success(monkeypatch):
+async def test_geocode_success_returns_list(monkeypatch):
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["q"] = request.url.params.get("q")
+        captured["limit"] = request.url.params.get("limit")
         captured["user_agent"] = request.headers.get("User-Agent")
         return httpx.Response(
             200,
             json=[
-                {
-                    "lat": "22.618",
-                    "lon": "120.308",
-                    "display_name": "夢時代購物中心, 高雄市",
-                }
+                {"lat": "25.0478", "lon": "121.5170", "display_name": "台北車站"},
+                {"lat": "25.0413", "lon": "121.5645", "display_name": "台北市中心"},
             ],
         )
 
     _patch_httpx(monkeypatch, handler)
 
-    result = await geocoding.geocode_location("夢時代")
-    assert result is not None
-    assert result["latitude"] == 22.618
-    assert result["longitude"] == 120.308
-    assert "夢時代" in result["display_name"]
-    assert "高雄" in captured["q"]  # query auto-appends 高雄
+    result = await geocoding.geocode_location("台北車站", city_hint="台北", limit=5)
+    assert isinstance(result, list)
+    assert len(result) == 2
+    assert result[0]["latitude"] == 25.0478
+    assert result[0]["longitude"] == 121.5170
+    assert "台北車站" in result[0]["display_name"]
+    assert captured["q"] == "台北車站 台北"
+    assert captured["limit"] == "5"
     assert captured["user_agent"].startswith("smart-traffic-system")
 
 
 @pytest.mark.asyncio
-async def test_geocode_empty_result(monkeypatch):
-    _patch_httpx(monkeypatch, lambda req: httpx.Response(200, json=[]))
-    assert await geocoding.geocode_location("asdfnotaplace") is None
-
-
-@pytest.mark.asyncio
-async def test_geocode_api_error_returns_none(monkeypatch):
-    _patch_httpx(monkeypatch, lambda req: httpx.Response(500, text="boom"))
-    assert await geocoding.geocode_location("夢時代") is None
-
-
-@pytest.mark.asyncio
-async def test_geocode_blank_query_returns_none():
-    assert await geocoding.geocode_location("") is None
-    assert await geocoding.geocode_location("   ") is None
-
-
-@pytest.mark.asyncio
-async def test_geocode_does_not_double_append_keyword(monkeypatch):
-    """Query already containing 高雄 should NOT have it appended again."""
+async def test_geocode_no_city_hint_does_not_append_anything(monkeypatch):
+    """When city_hint is None / empty, the query is sent verbatim with no suffix."""
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["q"] = request.url.params.get("q")
-        return httpx.Response(200, json=[{"lat": "22.6", "lon": "120.3", "display_name": "高雄"}])
+        return httpx.Response(200, json=[{"lat": "25.0", "lon": "121.5", "display_name": "x"}])
 
     _patch_httpx(monkeypatch, handler)
-    await geocoding.geocode_location("高雄火車站")
-    assert captured["q"] == "高雄火車站"
+    await geocoding.geocode_location("中正紀念堂")
+    assert captured["q"] == "中正紀念堂"
+
+    captured.clear()
+    await geocoding.geocode_location("中正紀念堂", city_hint=None)
+    assert captured["q"] == "中正紀念堂"
+
+    captured.clear()
+    await geocoding.geocode_location("中正紀念堂", city_hint="")
+    assert captured["q"] == "中正紀念堂"
+
+    captured.clear()
+    await geocoding.geocode_location("中正紀念堂", city_hint="   ")
+    assert captured["q"] == "中正紀念堂"
+
+
+@pytest.mark.asyncio
+async def test_geocode_with_city_hint_appends_to_query(monkeypatch):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["q"] = request.url.params.get("q")
+        return httpx.Response(200, json=[{"lat": "25.0", "lon": "121.5", "display_name": "x"}])
+
+    _patch_httpx(monkeypatch, handler)
+    await geocoding.geocode_location("中正紀念堂", city_hint="台北")
+    assert captured["q"].endswith("台北")
+    assert "中正紀念堂" in captured["q"]
+
+
+@pytest.mark.asyncio
+async def test_geocode_empty_result_returns_empty_list(monkeypatch):
+    _patch_httpx(monkeypatch, lambda req: httpx.Response(200, json=[]))
+    result = await geocoding.geocode_location("asdfnotaplace")
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_geocode_api_error_returns_empty_list(monkeypatch):
+    _patch_httpx(monkeypatch, lambda req: httpx.Response(500, text="boom"))
+    result = await geocoding.geocode_location("台北車站")
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_geocode_blank_query_returns_empty_list():
+    assert await geocoding.geocode_location("") == []
+    assert await geocoding.geocode_location("   ") == []
+
+
+@pytest.mark.asyncio
+async def test_geocode_limit_clamped_to_max(monkeypatch):
+    """limit > MAX_LIMIT (10) is clamped to 10 before being sent to Nominatim."""
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["limit"] = request.url.params.get("limit")
+        return httpx.Response(200, json=[])
+
+    _patch_httpx(monkeypatch, handler)
+    await geocoding.geocode_location("台北車站", limit=50)
+    assert captured["limit"] == "10"
+
+
+@pytest.mark.asyncio
+async def test_geocode_limit_floor(monkeypatch):
+    """limit < 1 is clamped up to 1 (Nominatim rejects limit=0)."""
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["limit"] = request.url.params.get("limit")
+        return httpx.Response(200, json=[])
+
+    _patch_httpx(monkeypatch, handler)
+    await geocoding.geocode_location("台北車站", limit=0)
+    assert captured["limit"] == "1"

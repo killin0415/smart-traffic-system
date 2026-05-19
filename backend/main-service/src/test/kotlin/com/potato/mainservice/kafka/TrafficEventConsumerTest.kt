@@ -15,23 +15,9 @@ class TrafficEventConsumerTest {
     }
 
     @Test
-    fun `onRouteResult should handle message without throwing`() {
-        assertDoesNotThrow {
-            consumer.onRouteResult("""{"route_id":"r1","path":"A->B","estimated_time":10}""")
-        }
-    }
-
-    @Test
     fun `onTrafficAlert should handle empty message`() {
         assertDoesNotThrow {
             consumer.onTrafficAlert("")
-        }
-    }
-
-    @Test
-    fun `onRouteResult should handle empty message`() {
-        assertDoesNotThrow {
-            consumer.onRouteResult("")
         }
     }
 }

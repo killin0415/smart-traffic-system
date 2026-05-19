@@ -710,10 +710,18 @@ async def plan_optimal_route(
         road_names = _dedupe_preserve_order([e.road_name for e in edge_objs if e.road_name])
         distance_km = sum(e.length_km for e in edge_objs)
         cameras = [cam for eid in edges for cam in cameras_by_edge.get(eid, [])]
+        coordinates: list[list[float]] = []
+        for nid in nodes:
+            node = graph.nodes.get(nid)
+            if node is None:
+                logger.warning("path contains node %s missing from graph; skipping in coordinates", nid)
+                continue
+            coordinates.append([node.latitude, node.longitude])
         routes_out.append(
             RouteItem(
                 path=nodes,
                 edges=edges,
+                coordinates=coordinates,
                 road_names=road_names,
                 estimated_time_min=round(cost_hours * 60.0, 2),
                 distance_km=round(distance_km, 3),

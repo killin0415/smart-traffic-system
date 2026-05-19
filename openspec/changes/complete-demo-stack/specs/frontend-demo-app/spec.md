@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: 前端專案結構
-專案 SHALL 包含 `frontend/` 目錄，內含 Vite + React 18 + TypeScript + Tailwind CSS + zustand + react-leaflet 應用。
+專案 SHALL 包含 `frontend/` 目錄，內含 Vite + React 19 + TypeScript + Tailwind CSS + zustand + react-leaflet 應用。
 
 #### Scenario: 目錄就位
 - **WHEN** 檢查 repo 根目錄
@@ -16,16 +16,16 @@
 - **THEN** SHALL 產出 `frontend/dist/` 內含可用的 SPA 靜態檔，且 SHALL 通過 `tsc --noEmit` 型別檢查
 
 ### Requirement: Vite dev proxy
-`frontend/vite.config.ts` SHALL 在 `server.proxy` 設定 `/api` 轉發到 `http://localhost:8080`，避免在 main-service 加 CORS 設定。
+`frontend/vite.config.ts` SHALL 在 `server.proxy` 設定 `/api` 轉發到 `http://localhost:8081`，避免在 main-service 加 CORS 設定。
 
 #### Scenario: API 請求轉發
 - **WHEN** 前端在 dev 模式下發送 `fetch('/api/v1/route', ...)` 或任何 `/api/*` 請求
-- **THEN** Vite dev server SHALL 把該請求轉發到 `http://localhost:8080`，並把 main-service 的回應原封轉回瀏覽器
+- **THEN** Vite dev server SHALL 把該請求轉發到 `http://localhost:8081`，並把 main-service 的回應原封轉回瀏覽器
 - **AND** 瀏覽器 SHALL NOT 看到 CORS 錯誤
 
 #### Scenario: proxy 設定缺失偵測
 - **WHEN** 檢查 `frontend/vite.config.ts`
-- **THEN** SHALL 看到 `server: { proxy: { '/api': { target: 'http://localhost:8080', changeOrigin: true } } }` 或等效 TS 設定
+- **THEN** SHALL 看到 `server: { proxy: { '/api': { target: 'http://localhost:8081', changeOrigin: true } } }` 或等效 TS 設定
 
 ### Requirement: 地圖顯示
 應用 SHALL 用 react-leaflet 顯示一張 Leaflet 地圖，預設中心為台北車站（25.0478, 121.5170），預設 zoom 14，圖磚來源為 OpenStreetMap (`https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png`)。

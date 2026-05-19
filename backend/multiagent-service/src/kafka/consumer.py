@@ -16,6 +16,7 @@ import traceback
 
 from confluent_kafka import Consumer, KafkaError
 
+from src.agents.geocoding import geocode_location
 from src.agents.routing import plan_optimal_route
 from src.kafka import runtime as kafka_runtime
 from src.kafka.producer import publish_message
@@ -29,7 +30,7 @@ KAFKA_CONFIG = {
     "auto.offset.reset": "latest",
 }
 
-DEFAULT_SUBSCRIBE_TOPICS = "chat.request,route.request"
+DEFAULT_SUBSCRIBE_TOPICS = "chat.request,route.request,geocode.request"
 
 _stop_event = threading.Event()
 
@@ -117,6 +118,17 @@ def handle_route_request(key: str, data: dict):
 
     user_id = data.get("user_id")
 
+    # Optional top_k from the request; default to plan_optimal_route's own
+    # default (3). Caller-supplied values are coerced to int and clamped to >=1
+    # so a malformed value can't disable planning.
+    raw_top_k = data.get("top_k")
+    top_k: int | None = None
+    if raw_top_k is not None:
+        try:
+            top_k = max(1, int(raw_top_k))
+        except (TypeError, ValueError):
+            top_k = None
+
     graph = kafka_runtime.get_graph()
     loop = kafka_runtime.get_loop()
     session_factory = kafka_runtime.get_session_factory()
@@ -136,10 +148,13 @@ def handle_route_request(key: str, data: dict):
 
     async def _run() -> dict:
         async with session_factory() as session:
+            kwargs: dict = {"user_id": user_id}
+            if top_k is not None:
+                kwargs["k"] = top_k
             return await plan_optimal_route(
                 session, graph, weight_provider,
                 origin_lat, origin_lng, dest_lat, dest_lng,
-                user_id=user_id,
+                **kwargs,
             )
 
     future = asyncio.run_coroutine_threadsafe(_run(), loop)
@@ -164,11 +179,70 @@ def handle_route_request(key: str, data: dict):
     )
 
 
+def handle_geocode_request(key: str, data: dict):
+    """Forward a geocode request to `agents/geocoding.py` and publish results.
+
+    Required fields: `query`. Optional: `city_hint`, `limit` (default 5, clamped
+    to <=10 by the geocoding module). Missing or blank query → empty results +
+    `error="query is required"`. Upstream Nominatim errors → empty results +
+    `error="<msg>"` (never crash the consumer thread).
+    """
+    correlation_id = data.get("correlation_id", key)
+    raw_query = data.get("query")
+    query = (raw_query or "").strip() if isinstance(raw_query, str) else ""
+
+    if not query:
+        publish_message(
+            topic="geocode.response",
+            key=correlation_id,
+            value={
+                "correlation_id": correlation_id,
+                "results": [],
+                "error": "query is required",
+            },
+        )
+        return
+
+    raw_hint = data.get("city_hint")
+    city_hint = raw_hint.strip() if isinstance(raw_hint, str) and raw_hint.strip() else None
+
+    raw_limit = data.get("limit", 5)
+    try:
+        limit = int(raw_limit) if raw_limit is not None else 5
+    except (TypeError, ValueError):
+        limit = 5
+
+    try:
+        results = _run_async(geocode_location(query, city_hint=city_hint, limit=limit))
+    except Exception as exc:
+        logger.exception("geocode_location failed for %r: %s", query, exc)
+        publish_message(
+            topic="geocode.response",
+            key=correlation_id,
+            value={
+                "correlation_id": correlation_id,
+                "results": [],
+                "error": f"upstream geocoding error: {exc}",
+            },
+        )
+        return
+
+    publish_message(
+        topic="geocode.response",
+        key=correlation_id,
+        value={
+            "correlation_id": correlation_id,
+            "results": results,
+        },
+    )
+
+
 # Registry of topic → handler. New microservices plug in by adding an entry here
 # (and including the topic in KAFKA_SUBSCRIBE_TOPICS).
 TOPIC_HANDLERS = {
     "chat.request": handle_chat_request,
     "route.request": handle_route_request,
+    "geocode.request": handle_geocode_request,
 }
 
 

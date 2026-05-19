@@ -112,8 +112,10 @@ class TestRouteResponseSchema:
 @pytest.fixture
 def _reset_runtime():
     kafka_runtime.set_runtime(graph=None, loop=None, session_factory=None)  # type: ignore[arg-type]
+    kafka_runtime.set_weight_provider(None)
     yield
     kafka_runtime.set_runtime(graph=None, loop=None, session_factory=None)  # type: ignore[arg-type]
+    kafka_runtime.set_weight_provider(None)
 
 
 @pytest.mark.asyncio

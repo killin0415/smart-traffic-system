@@ -26,3 +26,14 @@ test = [
     "pytest-asyncio>=0.25.0",
     "httpx>=0.28.0",
 ]
+
+[dependency-groups]
+dev = [
+    "psycopg2-binary>=2.9.12",
+    "testcontainers>=4.14.2",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that require Docker (testcontainers) and are skipped by default in unit-only runs",
+]

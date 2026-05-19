@@ -86,7 +86,7 @@ services:
         sleep 2;
       done;
       echo 'kafka-init: creating topics...';
-      for t in chat.request chat.response route.request route.response traffic.metrics traffic.alerts; do
+      for t in chat.request chat.response route.request route.response traffic.metrics traffic.alerts geocode.request geocode.response; do
         kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic $$t --partitions 1 --replication-factor 1;
       done;
       echo 'kafka-init: topic list:';
@@ -95,10 +95,12 @@ services:
 
   # --- 5. (選用) Kafka 管理介面: UI for Apache Kafka ---
   kafka-ui:
+    # Exposed on host 8090 — 8080 is commonly taken on Windows hosts by EDB's
+    # PEMHTTPD-x64 Apache service, and main-service itself runs on 8081.
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
     ports:
-      - "8080:8080"
+      - "8090:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092

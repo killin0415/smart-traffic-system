@@ -1,5 +1,6 @@
 """Unit tests for the Kafka consumer handlers."""
-from unittest.mock import patch, MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.kafka.consumer import (
     handle_chat_request,
@@ -125,3 +126,132 @@ class TestHandleRouteRequest:
         value = mock_publish.call_args.kwargs["value"]
         assert value["routes"] == []
         assert "error" in value
+
+
+def _wire_runtime_for_route_test(monkeypatch_runtime: MagicMock) -> MagicMock:
+    """Mock kafka_runtime so handle_route_request reaches the plan_optimal_route call.
+
+    Returns the mock_plan_optimal_route (AsyncMock) you can inspect.
+    """
+    graph = MagicMock()
+    graph.nodes = {1: object()}  # truthy
+    monkeypatch_runtime.get_graph.return_value = graph
+    monkeypatch_runtime.get_loop.return_value = MagicMock()
+    monkeypatch_runtime.get_weight_provider.return_value = None
+
+    async def _aenter(_self):
+        return MagicMock()
+
+    async def _aexit(_self, *_a):
+        return False
+
+    session_cm = MagicMock()
+    session_cm.__aenter__ = _aenter
+    session_cm.__aexit__ = _aexit
+    session_factory = MagicMock(return_value=session_cm)
+    monkeypatch_runtime.get_session_factory.return_value = session_factory
+
+
+def _make_run_coro_executor(captured_result):
+    """asyncio.run_coroutine_threadsafe replacement that executes the coro
+    on a fresh loop and wraps the result in a Future-like mock."""
+
+    def fake(coro, _loop):
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(coro)
+        finally:
+            loop.close()
+        captured_result.append(result)
+        fut = MagicMock()
+        fut.result.return_value = result
+        return fut
+
+    return fake
+
+
+class TestRouteTopKPropagation:
+    """top_k from `route.request` SHALL reach plan_optimal_route's `k` kwarg."""
+
+    @patch("asyncio.run_coroutine_threadsafe")
+    @patch("src.kafka.consumer.plan_optimal_route", new_callable=AsyncMock)
+    @patch("src.kafka.consumer.kafka_runtime")
+    @patch("src.kafka.consumer.publish_message")
+    def test_top_k_propagates_to_plan_optimal_route(
+        self, mock_publish, mock_runtime, mock_plan, mock_run_coro,
+    ):
+        mock_plan.return_value = {"routes": [], "error": None}
+        _wire_runtime_for_route_test(mock_runtime)
+        mock_run_coro.side_effect = _make_run_coro_executor([])
+
+        handle_route_request("r-tk", {
+            "correlation_id": "r-tk",
+            "origin_lat": 25.04, "origin_lng": 121.51,
+            "dest_lat": 25.05, "dest_lng": 121.52,
+            "top_k": 5,
+        })
+
+        mock_plan.assert_called_once()
+        assert mock_plan.call_args.kwargs["k"] == 5
+
+    @patch("asyncio.run_coroutine_threadsafe")
+    @patch("src.kafka.consumer.plan_optimal_route", new_callable=AsyncMock)
+    @patch("src.kafka.consumer.kafka_runtime")
+    @patch("src.kafka.consumer.publish_message")
+    def test_top_k_absent_uses_plan_optimal_route_default(
+        self, mock_publish, mock_runtime, mock_plan, mock_run_coro,
+    ):
+        mock_plan.return_value = {"routes": [], "error": None}
+        _wire_runtime_for_route_test(mock_runtime)
+        mock_run_coro.side_effect = _make_run_coro_executor([])
+
+        handle_route_request("r-default", {
+            "correlation_id": "r-default",
+            "origin_lat": 25.04, "origin_lng": 121.51,
+            "dest_lat": 25.05, "dest_lng": 121.52,
+        })
+
+        mock_plan.assert_called_once()
+        # No `k` kwarg → plan_optimal_route uses its own default (DEFAULT_TOP_K)
+        assert "k" not in mock_plan.call_args.kwargs
+
+    @patch("asyncio.run_coroutine_threadsafe")
+    @patch("src.kafka.consumer.plan_optimal_route", new_callable=AsyncMock)
+    @patch("src.kafka.consumer.kafka_runtime")
+    @patch("src.kafka.consumer.publish_message")
+    def test_top_k_zero_clamps_to_one(
+        self, mock_publish, mock_runtime, mock_plan, mock_run_coro,
+    ):
+        mock_plan.return_value = {"routes": [], "error": None}
+        _wire_runtime_for_route_test(mock_runtime)
+        mock_run_coro.side_effect = _make_run_coro_executor([])
+
+        handle_route_request("r-clamp", {
+            "correlation_id": "r-clamp",
+            "origin_lat": 25.04, "origin_lng": 121.51,
+            "dest_lat": 25.05, "dest_lng": 121.52,
+            "top_k": 0,
+        })
+
+        assert mock_plan.call_args.kwargs["k"] == 1
+
+    @patch("asyncio.run_coroutine_threadsafe")
+    @patch("src.kafka.consumer.plan_optimal_route", new_callable=AsyncMock)
+    @patch("src.kafka.consumer.kafka_runtime")
+    @patch("src.kafka.consumer.publish_message")
+    def test_top_k_garbage_falls_back_to_default(
+        self, mock_publish, mock_runtime, mock_plan, mock_run_coro,
+    ):
+        mock_plan.return_value = {"routes": [], "error": None}
+        _wire_runtime_for_route_test(mock_runtime)
+        mock_run_coro.side_effect = _make_run_coro_executor([])
+
+        handle_route_request("r-garbage", {
+            "correlation_id": "r-garbage",
+            "origin_lat": 25.04, "origin_lng": 121.51,
+            "dest_lat": 25.05, "dest_lng": 121.52,
+            "top_k": "not-an-int",
+        })
+
+        # Garbage top_k → treated as missing → no `k` kwarg
+        assert "k" not in mock_plan.call_args.kwargs

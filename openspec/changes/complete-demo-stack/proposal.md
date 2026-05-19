@@ -19,14 +19,14 @@
 - **BREAKING**：`agents/geocoding.py` 移除「自動附加『高雄』」邏輯（沿用既有 Taipei 路網設定，繼續硬編 city 已不正確）。改為呼叫端傳什麼就查什麼，並讓 Kafka 請求負載可選 `city_hint` 字串
 - **BREAKING**：`agents/geocoding.py` 函數簽名變更：`geocode_location(query: str) -> dict | None` → `geocode_location(query: str, city_hint: str | None = None, limit: int = 5) -> list[dict]`（回傳改成最多 `limit` 筆結果，無結果時回空 list；現存 caller 只有測試檔，可同步更新）
 - **BREAKING**：multiagent-service `DEFAULT_SUBSCRIBE_TOPICS` 由 `chat.request,route.request` 擴增為 `chat.request,route.request,geocode.request`（部署端若依賴預設值不顯式設 `KAFKA_SUBSCRIBE_TOPICS`，啟動後會自動多訂 `geocode.request` topic — Kafka broker 必須允許該 topic 存在或自動建立）
-- 新增 `frontend/` 目錄，Vite + React 18 + TypeScript + Tailwind CSS + zustand + Leaflet
+- 新增 `frontend/` 目錄，Vite + React 19 + TypeScript + Tailwind CSS + zustand + Leaflet
   - `RouteForm` 起終點 + 規劃按鈕（地址 autocomplete 用 geocode API，也可在地圖上點選 marker）
   - `MapView` Leaflet 地圖，顯示路線 polyline、起終點 marker、測速照相、停車場
   - `ChatPanel` 跟現有 chat 端點對話，當回應帶 `routeResult` 時把路線也丟到地圖上
   - `RouteSummary` 顯示距離 / 預估時間 / 測速照相 / 停車場
   - dark mode（Tailwind `dark:` variant）
   - 不做使用者登入；session_id 在前端用 `crypto.randomUUID()` 產生並存 `localStorage`
-- 開發環境：Vite dev server proxy `/api/*` → `localhost:8080`（main-service），避免 CORS；既有 `compose.yaml` 不動
+- 開發環境：Vite dev server proxy `/api/*` → `localhost:8081`（main-service），避免 CORS；既有 `compose.yaml` 不動
 
 ### Phase 2（本次只設計、**不實作**）
 

@@ -27,15 +27,15 @@ def _reset_consumer_stop_event():
 class TestSubscribeTopicsEnvVar:
     def test_default_when_unset(self, monkeypatch):
         monkeypatch.delenv("KAFKA_SUBSCRIBE_TOPICS", raising=False)
-        assert _resolve_topics() == ["chat.request", "route.request"]
+        assert _resolve_topics() == ["chat.request", "route.request", "geocode.request"]
 
     def test_default_when_empty_string(self, monkeypatch):
         monkeypatch.setenv("KAFKA_SUBSCRIBE_TOPICS", "")
-        assert _resolve_topics() == ["chat.request", "route.request"]
+        assert _resolve_topics() == ["chat.request", "route.request", "geocode.request"]
 
     def test_default_when_whitespace_only(self, monkeypatch):
         monkeypatch.setenv("KAFKA_SUBSCRIBE_TOPICS", "   ")
-        assert _resolve_topics() == ["chat.request", "route.request"]
+        assert _resolve_topics() == ["chat.request", "route.request", "geocode.request"]
 
     def test_parses_two_topics(self, monkeypatch):
         monkeypatch.setenv("KAFKA_SUBSCRIBE_TOPICS", "foo.bar,baz.qux")

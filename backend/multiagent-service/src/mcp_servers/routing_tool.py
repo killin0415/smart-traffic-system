@@ -45,6 +45,10 @@ class RouteItem(BaseModel):
 
     path: list[int] = Field(description="Ordered list of TrafficNode IDs along the route")
     edges: list[int] = Field(description="Ordered list of TrafficEdge IDs along the route")
+    coordinates: list[list[float]] = Field(
+        default_factory=list,
+        description="Ordered list of [lat, lng] pairs aligned with `path`, for client-side polyline rendering",
+    )
     road_names: list[str] = Field(default_factory=list, description="Deduplicated road names")
     estimated_time_min: float = Field(description="Estimated travel time in minutes (live-weighted)")
     distance_km: float = Field(description="Total route distance in km")

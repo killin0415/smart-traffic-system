@@ -108,7 +108,7 @@
 
 **狀態管理：** zustand 單一 store，分 slice：`routeSlice`（目前路線、起終點 marker）、`chatSlice`（訊息列表、session_id）、`uiSlice`（loading、error toast）。
 
-**API 層：** `src/api/*.ts` 包 fetch + zod 驗證 response。Vite dev proxy `/api/* → http://localhost:8080`。
+**API 層：** `src/api/*.ts` 包 fetch + zod 驗證 response。Vite dev proxy `/api/* → http://localhost:8081`。
 
 **地圖：** `react-leaflet` + OSM tile server（無 API key、無 quota）。
 
@@ -179,7 +179,7 @@ multiagent 端寫進 `chat.response` 的 `route_payload` 是 snake_case（`estim
 - **Nominatim rate limit（1 req/s）** → 多人同時打 geocode 會排隊。Mitigation：demo 級別影響可忽略；前端 autocomplete debounce 300ms 已大幅降低頻率。
 - **`routeResult` 為可選欄位** → 反序列化失敗風險。Mitigation：`@JsonIgnoreProperties(ignoreUnknown = true)` 已套用、欄位 nullable、Kotlin data class default `null`。
 - **前端 build 加進 monorepo 後 CI / 測試流程改變** → 既有 GH Actions 沒設前端 job。Mitigation：先不加 CI job，本次只跑 `npm run build` 在本機驗證；後續另立 change 處理 CI。
-- **Leaflet 在 React 18 strict mode 雙重 mount 議題** → react-leaflet v4+ 已修正，照官方範例做即可。
+- **Leaflet 在 React 18/19 strict mode 雙重 mount 議題** → react-leaflet v5+ 已修正，照官方範例做即可。
 - **Phase 2 WS 設計可能過早承諾介面** → 只記在 design.md，不寫成 spec requirement，未來實作時若發現更好方案可重新討論。
 
 ## Migration Plan
@@ -195,7 +195,7 @@ multiagent 端寫進 `chat.response` 的 `route_payload` 是 snake_case（`estim
 
 ## Open Questions
 
-- **Vite dev server port** 預設 5173，若需與 main-service 8080 共用 nginx，待 demo 部署時再決定。
+- **Vite dev server port** 預設 5173，若需與 main-service 8081 共用 nginx，待 demo 部署時再決定。
 - **地圖預設 center / zoom** 用台北車站（25.0478, 121.5170, zoom 14）作為硬編預設，是否需要 env 可調？暫不開放。
 - **autocomplete 結果數量** 預設 5 筆，是否需要使用者設定？暫不開放。
 - **chat session_id 過期策略** 目前永久存 localStorage，是否需要 TTL？demo 範圍不處理。

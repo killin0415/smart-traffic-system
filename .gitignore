@@ -50,3 +50,7 @@ docker-compose.override.yml
 *.log
 *.tmp
 *.swp
+
+# === Data dumps ===
+# Local OSM / data.taipei downloads — large, not source-of-truth.
+data/
