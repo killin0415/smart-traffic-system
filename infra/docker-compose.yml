@@ -109,10 +109,12 @@ services:
     networks:
       - traffic-net
 
-  # --- 6. 向量/全文搜尋: ElasticSearch ---
+  # --- 6. 向量/全文搜尋: ElasticSearch (選用) ---
+  # Not yet wired into any app code; enable via `--profile heavy` if you need it.
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
     container_name: traffic_es
+    profiles: ["heavy"]
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -124,10 +126,110 @@ services:
     networks:
       - traffic-net
 
+  # --- 7. One-shot data initialiser ---
+  # Idempotent: downloads taiwan-latest.osm.pbf, runs osm2pgsql + graph build +
+  # VD static seeding. Skips itself when traffic_node already has >=1000 rows.
+  data-init:
+    build:
+      context: ..
+      dockerfile: infra/data-init/Dockerfile
+    image: stm/data-init:dev
+    container_name: stm_data_init
+    restart: "no"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      DB_HOST: timescaledb
+      DB_PORT: "5432"
+      POSTGRES_DB: traffic_data
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - osm_data:/data
+    networks:
+      - traffic-net
+
+  # --- 8. main-service (Spring Boot Kotlin) ---
+  main-service:
+    build:
+      context: ../backend/main-service
+      dockerfile: Dockerfile
+    image: stm/main-service:dev
+    container_name: stm_main
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://timescaledb:5432/traffic_data
+      SPRING_DATASOURCE_USERNAME: admin
+      SPRING_DATASOURCE_PASSWORD: secret
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: "6379"
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    networks:
+      - traffic-net
+
+  # --- 9. multiagent-service (FastAPI + Kafka consumer) ---
+  multiagent-service:
+    build:
+      context: ../backend/multiagent-service
+      dockerfile: Dockerfile
+    image: stm/multiagent-service:dev
+    container_name: stm_multiagent
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      data-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://admin:secret@timescaledb:5432/traffic_data
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_SUBSCRIBE_TOPICS: chat.request,route.request,geocode.request
+      REDIS_URL: redis://redis:6379
+      # Secrets — supplied via repo-root .env (see .env.example).
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      TDX_CLIENT_ID: ${TDX_CLIENT_ID:-}
+      TDX_CLIENT_SECRET: ${TDX_CLIENT_SECRET:-}
+      VD_REFRESH_SECONDS: ${VD_REFRESH_SECONDS:-300}
+      PARKING_REFRESH_SECONDS: ${PARKING_REFRESH_SECONDS:-300}
+    networks:
+      - traffic-net
+
+  # --- 10. frontend (Vite build → nginx; proxies /api to main-service) ---
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    image: stm/frontend:dev
+    container_name: stm_frontend
+    restart: unless-stopped
+    depends_on:
+      - main-service
+    ports:
+      # Open the app at http://localhost:5173 (matches the dev-server URL).
+      - "5173:80"
+    networks:
+      - traffic-net
+
 volumes:
   postgres_data:
   redis_data:
   es_data:
+  osm_data:
 
 networks:
   traffic-net:

@@ -11,7 +11,44 @@ End-to-end demo stack for a Taipei-area smart traffic navigation system.
   TDX/VD/parking ingestion loops.
 - **`frontend/`** — Vite + React 19 + TypeScript + Tailwind v3 + Leaflet
   single-page demo app.
-- **`infra/`** — `docker-compose.yml` for TimescaleDB, Kafka, ZooKeeper.
+- **`infra/`** — `docker-compose.yml` for TimescaleDB, Kafka, ZooKeeper, plus
+  Dockerfiles for the three application services and a one-shot `data-init`
+  container that seeds the Taipei road graph.
+
+## Quick start (Docker — one command)
+
+For running on a fresh machine. Builds all three application images, brings
+up the infra, seeds the Taipei road graph (≈10–20 min on first boot),
+and serves the SPA on <http://localhost:5173>.
+
+```powershell
+# 1. Copy env template and fill in your DeepSeek key (TDX is optional).
+Copy-Item .env.example .env
+notepad .env
+
+# 2. Bring everything up.
+docker compose -f infra/docker-compose.yml --env-file .env up -d --build
+```
+
+Wait for `data-init` to exit successfully — track it with:
+
+```powershell
+docker logs -f stm_data_init
+```
+
+Then open <http://localhost:5173>.
+
+| Port | Service | Purpose |
+|---|---|---|
+| 5173 | frontend (nginx) | SPA + reverse-proxies `/api/*` to main-service |
+| 8081 | main-service | REST API (also reachable through the SPA proxy) |
+| 8090 | kafka-ui | Optional Kafka inspector |
+| 5432 | timescaledb | DB (exposed for local tooling) |
+| 6379 | redis | Cache |
+| 9092 | kafka | External listener |
+
+Tear down: `docker compose -f infra/docker-compose.yml down` (add `-v` to
+also wipe the seeded DB and OSM cache).
 
 ## Local development
 
