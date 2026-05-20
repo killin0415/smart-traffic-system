@@ -95,7 +95,7 @@
 ## 11. End-to-end integration test + acceptance + cleanup
 
 - [x] 11.1 派 test engineer sub-agent：寫 `tests/test_e2e_route.py` (`pytest -m integration`) 用 testcontainers full stack（timescaledb-ha + Kafka）→ 灌小 OSM fixture + mock VD/parking response → 對 Kafka 丟 route.request (台北車站 → 101) → assert response 含 routes (≥1)、estimated_minutes、speed_cameras、parking_suggestions 欄位
-- [ ] 11.2 manual acceptance：實機跑 5 min cycle → `SELECT COUNT(*) FROM vd_reading WHERE ts > NOW() - INTERVAL '5 min'` 確認 > 500
+- [x] 11.2 manual acceptance：實機跑 5 min cycle → `SELECT COUNT(*) FROM vd_reading WHERE ts > NOW() - INTERVAL '5 min'` 確認 > 500
 - [ ] 11.3 manual acceptance：route 台北車站 → 101，比對 estimated_minutes 跟 Google Maps，記錄差距（acceptance: ±50%）；若差距 > 50% 重新評估 calibration 公式
 - [x] 11.4 manual acceptance：`grep -r 'tdx_section_id\|TDX Live\|Kaohsiung\|section_to_edge\|MAX_CONGESTION_FACTOR' backend/ scripts/ infra/` 應該沒有結果（除 archive 文件以外）
 - [x] 11.5 跑 `cd backend/multiagent-service && uv run pytest` 全綠（含 integration tests，需先 docker pull image）
