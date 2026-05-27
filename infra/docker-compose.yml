@@ -1,9 +1,8 @@
-version: '3.8'
 
 services:
   # --- 1. 資料庫: PostgreSQL + TimescaleDB ---
   timescaledb:
-    image: timescale/timescaledb:latest-pg14
+    image: timescale/timescaledb-ha:pg14-all
     container_name: traffic_db
     environment:
       - POSTGRES_USER=admin
@@ -13,6 +12,13 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
+      - ./../scripts:/scripts:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d traffic_data"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - traffic-net
 
@@ -22,6 +28,13 @@ services:
     container_name: traffic_cache
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - traffic-net
 
@@ -52,12 +65,42 @@ services:
     networks:
       - traffic-net
 
-  # --- 4. (選用) Kafka 管理介面: UI for Apache Kafka ---
+  # --- 4. Kafka topic bootstrapper ---
+  # One-shot container that waits for Kafka to be ready and creates the
+  # 6 application topics used by main-service ↔ multiagent-service so that
+  # consumers don't spam UNKNOWN_TOPIC_OR_PART on first boot.
+  kafka-init:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka-init
+    depends_on:
+      - kafka
+    networks:
+      - traffic-net
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "
+      echo 'kafka-init: waiting for broker...';
+      for i in $$(seq 1 60); do
+        kafka-broker-api-versions --bootstrap-server kafka:29092 >/dev/null 2>&1 && break;
+        sleep 2;
+      done;
+      echo 'kafka-init: creating topics...';
+      for t in chat.request chat.response route.request route.response traffic.metrics traffic.alerts geocode.request geocode.response; do
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic $$t --partitions 1 --replication-factor 1;
+      done;
+      echo 'kafka-init: topic list:';
+      kafka-topics --bootstrap-server kafka:29092 --list;
+      "
+
+  # --- 5. (選用) Kafka 管理介面: UI for Apache Kafka ---
   kafka-ui:
+    # Exposed on host 8090 — 8080 is commonly taken on Windows hosts by EDB's
+    # PEMHTTPD-x64 Apache service, and main-service itself runs on 8081.
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
     ports:
-      - "8080:8080"
+      - "8090:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
@@ -66,8 +109,125 @@ services:
     networks:
       - traffic-net
 
+  # --- 6. 向量/全文搜尋: ElasticSearch (選用) ---
+  # Not yet wired into any app code; enable via `--profile heavy` if you need it.
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: traffic_es
+    profiles: ["heavy"]
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    networks:
+      - traffic-net
+
+  # --- 7. One-shot data initialiser ---
+  # Idempotent: downloads taiwan-latest.osm.pbf, runs osm2pgsql + graph build +
+  # VD static seeding. Skips itself when traffic_node already has >=1000 rows.
+  data-init:
+    build:
+      context: ..
+      dockerfile: infra/data-init/Dockerfile
+    image: stm/data-init:dev
+    container_name: stm_data_init
+    restart: "no"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      DB_HOST: timescaledb
+      DB_PORT: "5432"
+      POSTGRES_DB: traffic_data
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - osm_data:/data
+    networks:
+      - traffic-net
+
+  # --- 8. main-service (Spring Boot Kotlin) ---
+  main-service:
+    build:
+      context: ../backend/main-service
+      dockerfile: Dockerfile
+    image: stm/main-service:dev
+    container_name: stm_main
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://timescaledb:5432/traffic_data
+      SPRING_DATASOURCE_USERNAME: admin
+      SPRING_DATASOURCE_PASSWORD: secret
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: "6379"
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    networks:
+      - traffic-net
+
+  # --- 9. multiagent-service (FastAPI + Kafka consumer) ---
+  multiagent-service:
+    build:
+      context: ../backend/multiagent-service
+      dockerfile: Dockerfile
+    image: stm/multiagent-service:dev
+    container_name: stm_multiagent
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      data-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # Secrets (DEEPSEEK_API_KEY, TDX_*) and tunables (VD_REFRESH_SECONDS,
+    # PARKING_REFRESH_SECONDS, DEEPSEEK_MODEL) are read from repo-root .env.
+    # `environment:` below only holds infra-wired values that must override .env.
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://admin:secret@timescaledb:5432/traffic_data
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_SUBSCRIBE_TOPICS: chat.request,route.request,geocode.request
+      REDIS_URL: redis://redis:6379
+    networks:
+      - traffic-net
+
+  # --- 10. frontend (Vite build → nginx; proxies /api to main-service) ---
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    image: stm/frontend:dev
+    container_name: stm_frontend
+    restart: unless-stopped
+    depends_on:
+      - main-service
+    ports:
+      # Open the app at http://localhost:5173 (matches the dev-server URL).
+      - "5173:80"
+    networks:
+      - traffic-net
+
 volumes:
   postgres_data:
+  redis_data:
+  es_data:
+  osm_data:
 
 networks:
   traffic-net:
