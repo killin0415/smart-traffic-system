@@ -2,15 +2,18 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from src.kafka.producer import publish_message, get_producer, _producer
+from src.kafka.producer import publish_message, get_producer
 
 
 class TestGetProducer:
     """Tests for the get_producer singleton."""
 
     @patch("src.kafka.producer.Producer")
-    def test_get_producer_creates_instance_on_first_call(self, mock_producer_cls):
-        """Should create a Producer instance when none exists."""
+    def test_get_producer_uses_localhost_default_when_env_unset(
+        self, mock_producer_cls, monkeypatch
+    ):
+        """Should default to localhost:9092 when KAFKA_BOOTSTRAP_SERVERS is not set."""
+        monkeypatch.delenv("KAFKA_BOOTSTRAP_SERVERS", raising=False)
         import src.kafka.producer as mod
         mod._producer = None
 
@@ -18,6 +21,51 @@ class TestGetProducer:
 
         mock_producer_cls.assert_called_once_with({"bootstrap.servers": "localhost:9092"})
         assert producer is mock_producer_cls.return_value
+
+        # Cleanup
+        mod._producer = None
+
+    @patch("src.kafka.producer.Producer")
+    def test_get_producer_uses_env_var_when_set(
+        self, mock_producer_cls, monkeypatch
+    ):
+        """Should use KAFKA_BOOTSTRAP_SERVERS env var (e.g., Docker Compose broker)."""
+        monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092")
+        import src.kafka.producer as mod
+        mod._producer = None
+
+        producer = get_producer()
+
+        mock_producer_cls.assert_called_once_with({"bootstrap.servers": "kafka:29092"})
+        assert producer is mock_producer_cls.return_value
+
+        # Cleanup
+        mod._producer = None
+
+    @patch("src.kafka.producer.Producer")
+    def test_get_producer_resolves_env_lazily_after_singleton_reset(
+        self, mock_producer_cls, monkeypatch
+    ):
+        """Resetting the singleton picks up a new env value on next call.
+
+        Guards against module-import-time config capture: tests must be able to
+        switch broker addresses between cases.
+        """
+        import src.kafka.producer as mod
+
+        # First call with default.
+        monkeypatch.delenv("KAFKA_BOOTSTRAP_SERVERS", raising=False)
+        mod._producer = None
+        get_producer()
+
+        # Reset, change env, call again.
+        mod._producer = None
+        monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092")
+        get_producer()
+
+        configs = [call.args[0] for call in mock_producer_cls.call_args_list]
+        assert {"bootstrap.servers": "localhost:9092"} in configs
+        assert {"bootstrap.servers": "kafka:29092"} in configs
 
         # Cleanup
         mod._producer = None

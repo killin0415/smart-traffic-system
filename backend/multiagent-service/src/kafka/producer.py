@@ -3,21 +3,24 @@ Kafka producer utility for agent-service.
 Used to publish processed results (e.g., route recommendations, alerts) back to Kafka.
 """
 import json
+import os
 from confluent_kafka import Producer
 
 
-KAFKA_CONFIG = {
-    "bootstrap.servers": "localhost:9092",
-}
-
 _producer: Producer | None = None
+
+
+def _build_config() -> dict:
+    return {
+        "bootstrap.servers": os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
+    }
 
 
 def get_producer() -> Producer:
     """Get or create the Kafka producer singleton."""
     global _producer
     if _producer is None:
-        _producer = Producer(KAFKA_CONFIG)
+        _producer = Producer(_build_config())
         print("[Kafka Producer] Initialized")
     return _producer
 
