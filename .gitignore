@@ -33,6 +33,7 @@ venv/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+uv.lock
 
 # === Environment & Secrets ===
 .env

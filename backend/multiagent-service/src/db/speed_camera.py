@@ -26,7 +26,12 @@ from src.db.models import SpeedCamera
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CSV_PATH = Path(__file__).resolve().parents[4] / "data" / "taipei_speed_cameras.csv"
+_PARENTS = Path(__file__).resolve().parents
+DEFAULT_CSV_PATH = (
+    _PARENTS[4] / "data" / "taipei_speed_cameras.csv"
+    if len(_PARENTS) > 4
+    else Path("data/taipei_speed_cameras.csv")
+)
 
 # data.taipei urban default if 速限 column is missing/blank.
 DEFAULT_SPEED_LIMIT_KMH = 50

@@ -194,18 +194,16 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    # Secrets (DEEPSEEK_API_KEY, TDX_*) and tunables (VD_REFRESH_SECONDS,
+    # PARKING_REFRESH_SECONDS, DEEPSEEK_MODEL) are read from repo-root .env.
+    # `environment:` below only holds infra-wired values that must override .env.
+    env_file:
+      - ../.env
     environment:
       DATABASE_URL: postgresql+asyncpg://admin:secret@timescaledb:5432/traffic_data
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_SUBSCRIBE_TOPICS: chat.request,route.request,geocode.request
       REDIS_URL: redis://redis:6379
-      # Secrets — supplied via repo-root .env (see .env.example).
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
-      TDX_CLIENT_ID: ${TDX_CLIENT_ID:-}
-      TDX_CLIENT_SECRET: ${TDX_CLIENT_SECRET:-}
-      VD_REFRESH_SECONDS: ${VD_REFRESH_SECONDS:-300}
-      PARKING_REFRESH_SECONDS: ${PARKING_REFRESH_SECONDS:-300}
     networks:
       - traffic-net
 

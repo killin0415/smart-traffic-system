@@ -10,8 +10,9 @@ from pathlib import Path
 from fastapi import FastAPI
 import uvicorn
 
-_env_path = Path(__file__).resolve().parents[2] / ".env"
-if _env_path.exists():
+_parents = Path(__file__).resolve().parents
+_env_path = _parents[2] / ".env" if len(_parents) > 2 else None
+if _env_path is not None and _env_path.exists():
     for line in _env_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
