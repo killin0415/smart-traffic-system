@@ -1,0 +1,25 @@
+# Fdb version 4
+["pdflatex"] 1779784721 "e:/smart-traffic-system/references/project_intro.tex" "project_intro.pdf" "project_intro" 1779784721 2
+  "c:/texlive/2023/texmf-dist/fonts/map/fontname/texfonts.map" 1702374322 3524 cb3e574dea2d1052e39280babc910dc8 ""
+  "c:/texlive/2023/texmf-dist/fonts/tfm/public/cm/cmr12.tfm" 1702372336 1288 655e228510b4c2a1abe905c368440826 ""
+  "c:/texlive/2023/texmf-dist/tex/generic/iftex/iftex.sty" 1702375370 7237 bdd120a32c8fdb4b433cf9ca2e7cd98a ""
+  "c:/texlive/2023/texmf-dist/tex/generic/iftex/ifvtex.sty" 1702375370 1057 525c2192b5febbd8c1f662c9468335bb ""
+  "c:/texlive/2023/texmf-dist/tex/latex/base/article.cls" 1702375970 20144 fbcf51733730d8f1a62143512ff5b1fe ""
+  "c:/texlive/2023/texmf-dist/tex/latex/base/size12.clo" 1702375970 8449 9de778d73ba774a5f2bd601f23f8922e ""
+  "c:/texlive/2023/texmf-dist/tex/latex/fontspec/fontspec.sty" 1702374345 1656 7e824878bad4df5a3e8bba4e463d9126 ""
+  "c:/texlive/2023/texmf-dist/tex/latex/geometry/geometry.sty" 1702374563 41601 9cf6c5257b1bc7af01a58859749dd37a ""
+  "c:/texlive/2023/texmf-dist/tex/latex/graphics/keyval.sty" 1702374800 2671 7e67d78d9b88c845599a85b2d41f2e39 ""
+  "c:/texlive/2023/texmf-dist/tex/latex/l3backend/l3backend-pdftex.def" 1702375902 29988 6d57d2b884f7464419678df319af86d2 ""
+  "c:/texlive/2023/texmf-dist/tex/latex/l3kernel/expl3.sty" 1702375915 6565 bef242bf6728daafcd35db157fb9d4b9 ""
+  "c:/texlive/2023/texmf-dist/tex/latex/l3packages/xparse/xparse.sty" 1702375924 9327 c30c00c0072edba199ede5889311aaa9 ""
+  "c:/texlive/2023/texmf-dist/web2c/texmf.cnf" 1702370341 41009 84b61f42d16d06bedb915f57aa2374cf ""
+  "c:/texlive/2023/texmf-var/web2c/pdftex/pdflatex.fmt" 1702382323 8217929 01d359f98d2240387e78c3b6e2927980 ""
+  "c:/texlive/2023/texmf.cnf" 1702382187 713 e69b156964470283e0530f5060668171 ""
+  "e:/smart-traffic-system/references/project_intro.tex" 1779784720 9000 852abf144908fc176eda92f86901cf90 ""
+  "project_intro.aux" 1779784721 34 3985256e7290058c681f74d7a3565a19 "pdflatex"
+  "project_intro.tex" 1779784720 9000 852abf144908fc176eda92f86901cf90 ""
+  (generated)
+  "project_intro.aux"
+  "project_intro.log"
+  "project_intro.pdf"
+  (rewritten before read)

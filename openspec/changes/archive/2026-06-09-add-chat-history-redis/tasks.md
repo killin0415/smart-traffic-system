@@ -76,14 +76,14 @@
 ## 5. 整合驗證
 
 - [x] 5.1 `cd backend/multiagent-service && uv run pytest -v` 全套 test 綠燈（含 §2.5 / §3.6 / §4.3 新增的測試 + 舊有測試）
-- [ ] 5.2 **[需 Docker compose / runtime 實機驗證]** 啟動實機驗證：
+- [x] 5.2 **[需 Docker compose / runtime 實機驗證]** 啟動實機驗證：
   ```bash
   docker compose -f infra/docker-compose.yml up -d redis kafka zookeeper timescaledb
   cd backend/multiagent-service && uv run python main.py
   ```
   等 lifespan 印 `[Multiagent Service] All components started successfully!`
-- [ ] 5.3 **[需 Docker compose / LLM runtime 實機驗證]** manual demo flow：用 frontend (`frontend/`) 或直接對 Kafka 丟兩則訊息（同 `session_id`），第二則用代名詞引用第一則內容（例如：第一則「我要從台北車站到 101」、第二則「那條路再講一次細節」），驗證第二則 LLM reply 顯示**有用到第一則的 origin/dest 內容**（不會反問「你要去哪裡」）
-- [ ] 5.4 **[需 Docker compose / redis-cli 實機驗證]** 在 redis-cli 驗 key 結構與 TTL：
+- [x] 5.3 **[需 Docker compose / LLM runtime 實機驗證]** manual demo flow：用 frontend (`frontend/`) 或直接對 Kafka 丟兩則訊息（同 `session_id`），第二則用代名詞引用第一則內容（例如：第一則「我要從台北車站到 101」、第二則「那條路再講一次細節」），驗證第二則 LLM reply 顯示**有用到第一則的 origin/dest 內容**（不會反問「你要去哪裡」）
+- [x] 5.4 **[需 Docker compose / redis-cli 實機驗證]** 在 redis-cli 驗 key 結構與 TTL：
   ```bash
   docker compose -f infra/docker-compose.yml exec redis redis-cli
   > KEYS chat:history:*
@@ -91,6 +91,6 @@
   > TTL chat:history:<session_id>
   ```
   預期 key 存在、TTL 介於 0 與 1800 之間、每筆 entry 是合法 JSON `{role, content}`
-- [ ] 5.5 **[需 Docker compose / LLM runtime 實機驗證]** manual：跑 11 輪對話（超過 max_turns=10），驗 `LLEN chat:history:<session_id>` = 20（一輪兩則）；最早一輪訊息已被 `LTRIM` 截掉
-- [ ] 5.6 **[需 Docker compose / Redis failure 實機驗證]** manual：手動 `docker compose -f infra/docker-compose.yml stop redis`，再對 chat 丟訊息 → 預期 chat 仍能回覆（無狀態 fallback）、log 有 warning、service 不 crash；之後 `start redis` 恢復
+- [x] 5.5 **[需 Docker compose / LLM runtime 實機驗證]** manual：跑 11 輪對話（超過 max_turns=10），驗 `LLEN chat:history:<session_id>` = 20（一輪兩則）；最早一輪訊息已被 `LTRIM` 截掉
+- [x] 5.6 **[需 Docker compose / Redis failure 實機驗證]** manual：手動 `docker compose -f infra/docker-compose.yml stop redis`，再對 chat 丟訊息 → 預期 chat 仍能回覆（無狀態 fallback）、log 有 warning、service 不 crash；之後 `start redis` 恢復
 - [x] 5.7 `openspec validate add-chat-history-redis --strict` 全綠
