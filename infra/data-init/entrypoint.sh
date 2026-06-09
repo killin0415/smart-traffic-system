@@ -20,16 +20,26 @@ PBF_PATH="$DATA_DIR/taiwan-latest.osm.pbf"
 
 SKIP_MIN_NODES="${SKIP_MIN_NODES:-1000}"
 
+# osm2pgsql parallelism / memory tuning. All overridable via env so CI or
+# low-RAM hosts can dial them back.
+#   OSM_NUM_PROCESSES — worker threads for the processing phase (default: all CPUs)
+#   OSM_CACHE_MB      — in-RAM node cache in MB (0 disables; pairs with flat-nodes)
+#   OSM_FLAT_NODES    — flat-node file path; off-DB node store, much faster for
+#                       a whole-country PBF scan. Set empty to fall back to DB.
+OSM_NUM_PROCESSES="${OSM_NUM_PROCESSES:-$(nproc 2>/dev/null || echo 4)}"
+OSM_CACHE_MB="${OSM_CACHE_MB:-2048}"
+OSM_FLAT_NODES="${OSM_FLAT_NODES:-$DATA_DIR/flat-nodes.bin}"
+
 log() { echo "[data-init] $*" >&2; }
 
 log "waiting for $DB_HOST:$DB_PORT to accept connections..."
 for _ in $(seq 1 60); do
-    if pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" >/dev/null 2>&1; then
+    if pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>&1; then
         break
     fi
     sleep 2
 done
-if ! pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" >/dev/null 2>&1; then
+if ! pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>&1; then
     log "ERROR: postgres did not become ready"
     exit 1
 fi
@@ -59,30 +69,59 @@ else
     log "using cached $PBF_PATH"
 fi
 
-# 2. osm2pgsql import with bbox crop.
-log "running osm2pgsql (bbox=$BBOX)..."
-osm2pgsql \
-    --create --slim --hstore \
+# 2. Pre-crop the PBF to the target bbox with osmium.
+#    osm2pgsql --bbox only filters OUTPUT — it still parses every node/way in
+#    the whole-country PBF (24.9M nodes for Taiwan) and builds their geometry,
+#    which is what made the import take ~1h. osmium extract crops the INPUT
+#    first (one sequential pass, a few minutes) so osm2pgsql then sees only the
+#    Taipei subset (~100x fewer features) and finishes in minutes.
+#    --strategy complete_ways keeps ways that cross the bbox edge intact, so the
+#    routing graph isn't truncated at the boundary.
+IMPORT_PBF="$DATA_DIR/cropped.osm.pbf"
+log "cropping PBF to bbox=$BBOX with osmium..."
+osmium extract \
     --bbox "$BBOX" \
-    --style /app/scripts/osm2pgsql.style \
-    -d "$DB_NAME" -U "$DB_USER" \
-    -H "$DB_HOST" -P "$DB_PORT" \
+    --strategy complete_ways \
+    --overwrite \
+    -o "$IMPORT_PBF" \
     "$PBF_PATH"
 
-# 3. Build the routing graph.
+# 3. osm2pgsql import of the cropped extract.
+#    --number-processes spreads the processing phase across CPUs, -C keeps nodes
+#    in RAM, and --flat-nodes stores the node index in a file instead of DB
+#    tables. No --bbox here: the input is already cropped.
+osm2pgsql_args=(
+    --create --slim --hstore
+    --number-processes "$OSM_NUM_PROCESSES"
+    --style /app/scripts/osm2pgsql.style
+    -d "$DB_NAME" -U "$DB_USER"
+    -H "$DB_HOST" -P "$DB_PORT"
+)
+if [[ "${OSM_CACHE_MB:-0}" -gt 0 ]]; then
+    osm2pgsql_args+=(-C "$OSM_CACHE_MB")
+fi
+if [[ -n "$OSM_FLAT_NODES" ]]; then
+    osm2pgsql_args+=(--flat-nodes "$OSM_FLAT_NODES")
+    # Stale flat-node file from a prior aborted run would corrupt the index.
+    rm -f "$OSM_FLAT_NODES"
+fi
+log "running osm2pgsql (procs=$OSM_NUM_PROCESSES, cache=${OSM_CACHE_MB}MB)..."
+osm2pgsql "${osm2pgsql_args[@]}" "$IMPORT_PBF"
+
+# 4. Build the routing graph.
 log "running build_graph_from_osm.sql..."
 psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" \
     -v ON_ERROR_STOP=1 \
     -f /app/scripts/build_graph_from_osm.sql
 
-# 4. Seed VD static via the multiagent venv (script imports from src.*).
+# 5. Seed VD static via the multiagent venv (script imports from src.*).
 log "seeding VD static..."
 cd /app/multiagent
 DATABASE_URL="postgresql+asyncpg://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME" \
 KAFKA_BOOTSTRAP_SERVERS="${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}" \
 uv run --no-sync python /app/scripts/seed_vd_static.py
 
-# 5. Snap VD to nearest edge.
+# 6. Snap VD to nearest edge.
 log "running post_build_snap_vd.sql..."
 psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" \
     -v ON_ERROR_STOP=1 \

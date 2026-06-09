@@ -153,23 +153,25 @@ _UPSERT_SQL = text(
 async def upsert_vd_records(db_url: str, records: list[VDRecord]) -> int:
     if not records:
         return 0
+    # Single executemany roundtrip instead of one INSERT per record — the VD
+    # feed is a few thousand rows and the row-by-row loop was the slow part.
+    params = [
+        {
+            "vdid": r.vdid,
+            "link_id": r.link_id,
+            "road_name": r.road_name,
+            "road_class": r.road_class,
+            "bidirectional": r.bidirectional,
+            "bearing": r.bearing,
+            "latitude": r.latitude,
+            "longitude": r.longitude,
+        }
+        for r in records
+    ]
     engine = create_async_engine(db_url, echo=False)
     try:
         async with engine.begin() as conn:
-            for r in records:
-                await conn.execute(
-                    _UPSERT_SQL,
-                    {
-                        "vdid": r.vdid,
-                        "link_id": r.link_id,
-                        "road_name": r.road_name,
-                        "road_class": r.road_class,
-                        "bidirectional": r.bidirectional,
-                        "bearing": r.bearing,
-                        "latitude": r.latitude,
-                        "longitude": r.longitude,
-                    },
-                )
+            await conn.execute(_UPSERT_SQL, params)
         return len(records)
     finally:
         await engine.dispose()

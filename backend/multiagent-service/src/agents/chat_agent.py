@@ -20,11 +20,14 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openai import AsyncOpenAI
 
 from src.mcp_servers.routing_tool import plan_route
+
+if TYPE_CHECKING:
+    from src.agents.chat_history import ChatHistoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,15 @@ SYSTEM_INSTRUCTION = (
 GENERIC_ERROR_REPLY = "目前服務忙線，請稍後再試。"
 FALLBACK_REPLY = "[Multiagent Service] 已收到您的訊息，但 AI 推論功能尚未啟用。"
 SERVICE_NOT_READY_REPLY = "服務啟動中，請稍後再試。"
+EMPTY_CONTENT_REPLY = "（已收到您的訊息）"
+TOOL_LOOP_EXHAUSTED_REPLY = "（已執行工具但回覆超過內部上限）"
+PLACEHOLDER_REPLIES = {
+    GENERIC_ERROR_REPLY,
+    FALLBACK_REPLY,
+    SERVICE_NOT_READY_REPLY,
+    EMPTY_CONTENT_REPLY,
+    TOOL_LOOP_EXHAUSTED_REPLY,
+}
 
 
 # OpenAI-format JSON-Schema for the plan_route tool. Keep this in lockstep with
@@ -95,11 +107,14 @@ class ChatAgent:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         max_tool_loops: int = DEFAULT_MAX_TOOL_LOOPS,
         base_url: str = DEEPSEEK_BASE_URL,
+        *,
+        history_store: "ChatHistoryStore | None" = None,
     ) -> None:
         self._model = model
         self._timeout = timeout_seconds
         self._max_tokens = max_tokens
         self._max_tool_loops = max_tool_loops
+        self._history_store = history_store
         if api_key:
             self._client: AsyncOpenAI | None = AsyncOpenAI(api_key=api_key, base_url=base_url)
         else:
@@ -136,7 +151,18 @@ class ChatAgent:
             captured["payload"] = result
         return json.dumps(result, ensure_ascii=False)
 
-    async def agenerate(self, content: str) -> dict[str, Any]:
+    def _should_append_reply(self, reply: str) -> bool:
+        return bool(reply) and reply not in PLACEHOLDER_REPLIES
+
+    async def _append_history_if_needed(self, session_id: str | None, content: str, reply: str) -> None:
+        if not session_id or self._history_store is None or not self._should_append_reply(reply):
+            return
+        try:
+            await self._history_store.append_turn(session_id, content, reply)
+        except Exception:
+            logger.warning("append_turn failed", exc_info=True)
+
+    async def agenerate(self, content: str, session_id: str | None = None) -> dict[str, Any]:
         """Generate a reply (and optional route payload) for a chat message.
 
         Returns:
@@ -154,8 +180,12 @@ class ChatAgent:
             return {"reply": SERVICE_NOT_READY_REPLY, "route_payload": None}
 
         captured: dict[str, Any] = {"payload": None}
+        history: list[dict[str, Any]] = []
+        if session_id and self._history_store:
+            history = await self._history_store.load(session_id)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_INSTRUCTION},
+            *history,
             {"role": "user", "content": content},
         ]
 
@@ -176,7 +206,8 @@ class ChatAgent:
                     timeout=self._timeout,
                 )
                 choice_msg = response.choices[0].message
-                # Append assistant's turn to the history so subsequent calls see it.
+                # Keep the in-flight tool loop coherent. Redis history is only
+                # appended once a final assistant text reply is known.
                 assistant_entry: dict[str, Any] = {
                     "role": "assistant",
                     "content": choice_msg.content or "",
@@ -193,7 +224,8 @@ class ChatAgent:
                 messages.append(assistant_entry)
 
                 if not choice_msg.tool_calls:
-                    reply = (choice_msg.content or "").strip() or "（已收到您的訊息）"
+                    reply = (choice_msg.content or "").strip() or EMPTY_CONTENT_REPLY
+                    await self._append_history_if_needed(session_id, content, reply)
                     return {"reply": reply, "route_payload": captured["payload"]}
 
                 # Run every requested tool call and feed results back as `tool` messages.
@@ -208,8 +240,10 @@ class ChatAgent:
                     )
             # Loop exhausted without a final assistant text reply.
             logger.warning("Chat agent hit max_tool_loops=%d", self._max_tool_loops)
+            reply = TOOL_LOOP_EXHAUSTED_REPLY
+            await self._append_history_if_needed(session_id, content, reply)
             return {
-                "reply": "（已執行工具但回覆超過內部上限）",
+                "reply": reply,
                 "route_payload": captured["payload"],
             }
         except asyncio.TimeoutError:
@@ -222,4 +256,9 @@ class ChatAgent:
 
 def build_chat_agent_from_env() -> ChatAgent:
     """Construct a ChatAgent honoring `DEEPSEEK_API_KEY` from env."""
-    return ChatAgent(api_key=os.getenv("DEEPSEEK_API_KEY"))
+    from src.agents.chat_history import build_chat_history_store_from_env
+
+    return ChatAgent(
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        history_store=build_chat_history_store_from_env(),
+    )

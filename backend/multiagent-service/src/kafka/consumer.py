@@ -73,7 +73,7 @@ def handle_chat_request(key: str, data: dict):
         route_payload = None
     else:
         try:
-            result = _run_async(chat_agent.agenerate(content))
+            result = _run_async(chat_agent.agenerate(content, session_id=session_id or None))
             reply = result.get("reply", "")
             route_payload = result.get("route_payload")
         except Exception as exc:

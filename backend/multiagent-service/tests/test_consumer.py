@@ -78,6 +78,48 @@ class TestHandleChatRequest:
         value = mock_publish.call_args.kwargs["value"]
         assert "route_payload" not in value
 
+    @patch("src.kafka.consumer._run_async")
+    @patch("src.kafka.consumer.kafka_runtime.get_chat_agent")
+    @patch("src.kafka.consumer.publish_message")
+    def test_forwards_session_id_to_chat_agent(self, _mock_publish, mock_get_agent, mock_run_async):
+        mock_chat_agent = MagicMock()
+        mock_chat_agent.agenerate = AsyncMock(return_value={"reply": "ok", "route_payload": None})
+        mock_get_agent.return_value = mock_chat_agent
+        mock_run_async.side_effect = _run_coro_immediately
+
+        handle_chat_request("c1", {"correlation_id": "c1", "session_id": "s1", "content": "hi"})
+
+        assert mock_chat_agent.agenerate.await_args.kwargs["session_id"] == "s1"
+        mock_chat_agent.agenerate.assert_awaited_once_with("hi", session_id="s1")
+
+    @patch("src.kafka.consumer._run_async")
+    @patch("src.kafka.consumer.kafka_runtime.get_chat_agent")
+    @patch("src.kafka.consumer.publish_message")
+    def test_missing_session_id_forwards_none_to_chat_agent(self, _mock_publish, mock_get_agent, mock_run_async):
+        mock_chat_agent = MagicMock()
+        mock_chat_agent.agenerate = AsyncMock(return_value={"reply": "ok", "route_payload": None})
+        mock_get_agent.return_value = mock_chat_agent
+        mock_run_async.side_effect = _run_coro_immediately
+
+        handle_chat_request("c-missing", {"correlation_id": "c-missing", "content": "hi"})
+
+        assert mock_chat_agent.agenerate.await_args.kwargs["session_id"] is None
+        mock_chat_agent.agenerate.assert_awaited_once_with("hi", session_id=None)
+
+    @patch("src.kafka.consumer._run_async")
+    @patch("src.kafka.consumer.kafka_runtime.get_chat_agent")
+    @patch("src.kafka.consumer.publish_message")
+    def test_empty_session_id_forwards_none_to_chat_agent(self, _mock_publish, mock_get_agent, mock_run_async):
+        mock_chat_agent = MagicMock()
+        mock_chat_agent.agenerate = AsyncMock(return_value={"reply": "ok", "route_payload": None})
+        mock_get_agent.return_value = mock_chat_agent
+        mock_run_async.side_effect = _run_coro_immediately
+
+        handle_chat_request("c-empty", {"correlation_id": "c-empty", "session_id": "", "content": "hi"})
+
+        assert mock_chat_agent.agenerate.await_args.kwargs["session_id"] is None
+        mock_chat_agent.agenerate.assert_awaited_once_with("hi", session_id=None)
+
 
 class TestHandleRouteRequest:
     """Route handler runs A* against the in-memory RoadGraph.
@@ -168,6 +210,15 @@ def _make_run_coro_executor(captured_result):
         return fut
 
     return fake
+
+
+def _run_coro_immediately(coro):
+    """Execute a coroutine so AsyncMock.await_args is populated in handler tests."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 class TestRouteTopKPropagation:

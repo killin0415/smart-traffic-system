@@ -26,6 +26,7 @@ interface ChatSlice {
   messages: ChatMessage[]
   sessionId: string
   appendMessage(message: ChatMessage): void
+  clearChat(): void
 }
 
 interface UiSlice {
@@ -46,14 +47,17 @@ export type AppState = RouteSlice & ChatSlice & UiSlice
 const STORAGE_KEY_SESSION = 'sid'
 const STORAGE_KEY_THEME = 'theme'
 
+function generateSessionId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2)
+}
+
 function initialSessionId(): string {
   if (typeof window === 'undefined') return 'ssr-placeholder'
   const existing = window.localStorage.getItem(STORAGE_KEY_SESSION)
   if (existing) return existing
-  const generated =
-    typeof crypto !== 'undefined' && 'randomUUID' in crypto
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2)
+  const generated = generateSessionId()
   window.localStorage.setItem(STORAGE_KEY_SESSION, generated)
   return generated
 }
@@ -113,16 +117,31 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ selectedRouteIndex: index })
   },
   setOriginMarker(marker) {
-    set({ originMarker: marker })
+    set((state) =>
+      state.currentRoute
+        ? { originMarker: marker, currentRoute: null, selectedRouteIndex: 0 }
+        : { originMarker: marker },
+    )
   },
   setDestMarker(marker) {
-    set({ destMarker: marker })
+    set((state) =>
+      state.currentRoute
+        ? { destMarker: marker, currentRoute: null, selectedRouteIndex: 0 }
+        : { destMarker: marker },
+    )
   },
 
   messages: [],
   sessionId: initialSessionId(),
   appendMessage(message) {
     set((state) => ({ messages: [...state.messages, message] }))
+  },
+  clearChat() {
+    const nextSessionId = generateSessionId()
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(STORAGE_KEY_SESSION, nextSessionId)
+    }
+    set({ messages: [], sessionId: nextSessionId })
   },
 
   loading: false,

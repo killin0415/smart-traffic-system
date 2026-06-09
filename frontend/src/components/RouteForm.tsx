@@ -35,6 +35,18 @@ export default function RouteForm() {
   }, [destMarker])
 
   const canSubmit = originMarker !== null && destMarker !== null && !loading
+  const canClear =
+    !loading &&
+    (originMarker !== null ||
+      destMarker !== null ||
+      originText.length > 0 ||
+      destText.length > 0)
+
+  function handleClear() {
+    setCurrentRoute(null)
+    setOriginText('')
+    setDestText('')
+  }
 
   async function handleSubmit() {
     if (!originMarker || !destMarker) return
@@ -79,18 +91,33 @@ export default function RouteForm() {
         onTextChange={setDestText}
         onSelect={({ lat, lng }) => setDestMarker([lat, lng])}
       />
-      <button
-        type="button"
-        disabled={!canSubmit}
-        onClick={handleSubmit}
-        className={[
-          'w-full rounded-md px-4 py-2 text-sm font-medium text-white',
-          'bg-blue-600 hover:bg-blue-700',
-          'disabled:cursor-not-allowed disabled:bg-slate-400',
-        ].join(' ')}
-      >
-        {loading ? '規劃中…' : '規劃路線'}
-      </button>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          disabled={!canSubmit}
+          onClick={handleSubmit}
+          className={[
+            'flex-1 rounded-md px-4 py-2 text-sm font-medium text-white',
+            'bg-blue-600 hover:bg-blue-700',
+            'disabled:cursor-not-allowed disabled:bg-slate-400',
+          ].join(' ')}
+        >
+          {loading ? '規劃中…' : '規劃路線'}
+        </button>
+        <button
+          type="button"
+          disabled={!canClear}
+          onClick={handleClear}
+          className={[
+            'rounded-md border px-3 py-2 text-sm font-medium',
+            'border-slate-300 bg-white text-slate-700 hover:bg-slate-100',
+            'dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700',
+            'disabled:cursor-not-allowed disabled:opacity-50',
+          ].join(' ')}
+        >
+          清除
+        </button>
+      </div>
     </section>
   )
 }
