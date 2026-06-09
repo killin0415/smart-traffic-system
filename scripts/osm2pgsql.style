@@ -1,0 +1,14 @@
+# osm2pgsql style for Taipei road-network ingestion.
+# Keep only the minimal tag set we need to build a routable graph.
+#
+# Format: OsmType  Tag       DataType  Flags
+# Flags:  linear  -> line
+#         polygon -> polygon (we don't need these for routing but keep for completeness)
+#         delete  -> drop the tag entirely
+
+node,way   highway     text    linear
+way        maxspeed    text    linear
+way        oneway      text    linear
+way        name        text    linear,polygon
+way        ref         text    linear
+way        lanes       text    linear

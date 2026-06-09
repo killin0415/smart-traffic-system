@@ -1,0 +1,59 @@
+# Sent as build context for repo-root builds (currently: infra/data-init).
+# Keep aggressive — node_modules + .venv + the data/ dump add up to several GB.
+
+# --- VCS / IDE ---
+.git/
+.github/
+.idea/
+.vscode/
+*.iml
+*.iws
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+
+# --- Python ---
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.venv/
+**/venv/
+**/*.egg-info/
+
+# --- Node / frontend ---
+**/node_modules/
+**/dist/
+**/dist-ssr/
+**/.vite/
+**/coverage/
+
+# --- Java / Kotlin / Gradle ---
+**/build/
+**/.gradle/
+!**/gradle/wrapper/gradle-wrapper.jar
+**/out/
+**/bin/
+
+# --- Large local data dumps (not source-of-truth) ---
+data/
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Docs / openspec / references not needed in any image ---
+openspec/
+references/
+memory/
+*.md
+!README.md
+
+# --- Other Dockerfiles' own contexts (already inert in those builds but
+# we don't need them in the data-init image either) ---
+backend/main-service/build/
+backend/main-service/.gradle/
+frontend/dist/

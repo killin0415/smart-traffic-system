@@ -1,1 +1,0 @@
-# Proto generated stubs module

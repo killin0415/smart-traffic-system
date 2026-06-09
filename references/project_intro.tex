@@ -1,0 +1,128 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[top=2.5cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{geometry}
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\usepackage{setspace}
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
+
+\setmainfont{Times New Roman}
+\setCJKmainfont[AutoFakeBold=2]{PMingLiU}
+\setCJKsansfont[AutoFakeBold=2]{PMingLiU}
+\setCJKmonofont[AutoFakeBold=2]{PMingLiU}
+\XeTeXlinebreaklocale "zh"
+\XeTeXlinebreakskip=0pt plus 1pt
+\setstretch{1.0}
+\emergencystretch=2em
+\sloppy
+\pagestyle{plain}
+\renewcommand{\figurename}{圖}
+\renewcommand{\tablename}{表}
+
+\newcommand{\infobox}[2]{\noindent\hspace{2em}\parbox[t]{0.86\textwidth}{\raggedright\textbf{#1：}#2}\par}
+\newcommand{\sectiontitle}[1]{\vspace{0.8em}\noindent{\fontsize{16}{19}\selectfont\bfseries #1}\par\vspace{0.3em}}
+
+\begin{document}
+
+\begin{center}
+{\fontsize{20}{24}\selectfont\bfseries 對話式智慧導航：基於大型語言模型多代理人與事件驅動架構之即時路徑規劃系統\par}
+\vspace{0.4em}
+{\fontsize{18}{22}\selectfont\bfseries Conversational Smart Navigation: An LLM Multi-Agent and Event-Driven System for Real-Time Route Planning\par}
+\end{center}
+
+\vspace{0.8em}
+\infobox{指導教授}{涂嘉恒}
+\infobox{專題成員}{廖子閔}
+\infobox{開發工具}{Spring Boot、FastAPI、React、Kafka、TimescaleDB/PostGIS、Redis、Docker、DeepSeek API}
+\infobox{測試環境}{Windows、Docker Compose、pytest、Gradle Test、Vitest}
+
+\sectiontitle{一、專題簡介：}
+
+本專題建置一套以台北市區為場域的智慧交通導航系統，目標是將即時交通資料、道路圖資、停車資訊與自然語言互動整合到同一套路徑規劃流程中。傳統導航服務多以固定路網成本或外部平台估算為主，難以在專題展示環境中說明資料如何進入系統、如何影響演算法，以及如何回饋給使用者。本系統因此採用可觀察、可替換的服務化架構，讓路網匯入、即時權重更新、路徑搜尋、聊天代理與前端地圖呈現都能獨立測試與展示。
+
+系統資料來源包含 OpenStreetMap 台北路網、TDX Live VD/City/Taipei 車輛偵測器即時資料，以及 data.taipei 停車場可用車位資料。路網資料匯入 TimescaleDB/PostGIS 後，會轉換為 \texttt{traffic\_node} 與 \texttt{traffic\_edge}，供路徑演算法建立 in-memory graph。VD 靜態資料先離線種入資料庫，即時讀數則由週期性程序呼叫 TDX Live VD JSON API，彙整為道路權重；停車資料則用於目的地附近資訊提示。此設計使服務啟動不依賴外部資料源即時可用，並保留即時資料失效時回退至基礎路網權重的能力。
+
+核心演算法採用 A* search。每條道路的基礎成本由距離、速限與號誌節點懲罰估算，系統再將 VD 即時速度轉換為動態權重，更新至圖結構中。當使用者輸入起訖點時，系統先將座標 snap 到鄰近路網節點，再計算 top-k 候選路線，回傳距離、預估時間、道路名稱、測速照相與停車資訊。為降低資料庫查詢延遲，路徑搜尋在 multi-agent service 的記憶體圖上執行，資料庫主要負責持久化與週期性更新。
+
+自然語言互動由聊天代理負責。使用者可直接輸入「從台北車站到台北 101」這類需求，聊天代理會透過工具呼叫取得結構化路線結果，再產生文字說明。後端對外由 Spring Boot main-service 提供 REST API，並透過 Kafka 與 Python multi-agent service 交換 \texttt{chat.request}、\texttt{chat.response}、\texttt{route.request} 與 \texttt{route.response} 等訊息。前端則以 React、TypeScript 與 Leaflet 呈現地址搜尋、地圖點選、路線折線、起終點標記、測速照相與停車場標記。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  node distance=1.15cm and 1.55cm,
+  box/.style={draw, rounded corners=2pt, align=center, minimum width=2.7cm, minimum height=0.85cm},
+  data/.style={draw, cylinder, shape border rotate=90, aspect=0.25, align=center, minimum height=0.9cm, minimum width=2.4cm},
+  arrow/.style={-Latex, thick}
+]
+\node[box] (frontend) {React / Leaflet\\前端介面};
+\node[box, right=of frontend] (main) {Spring Boot\\REST API};
+\node[box, right=of main] (kafka) {Kafka\\訊息交換};
+\node[box, right=of kafka] (agent) {FastAPI\\Multi-Agent};
+\node[data, below=of agent] (db) {TimescaleDB\\PostGIS};
+\node[box, above=of agent] (open) {OSM / TDX VD\\停車開放資料};
+\node[box, below=of kafka] (redis) {Redis\\快取};
+\node[box, below=of main] (llm) {DeepSeek\\聊天代理};
+
+\draw[arrow] (frontend) -- node[above]{HTTP} (main);
+\draw[arrow] (main) -- node[above]{request} (kafka);
+\draw[arrow] (kafka) -- node[above]{event} (agent);
+\draw[arrow] (open) -- (agent);
+\draw[arrow] (agent) -- (db);
+\draw[arrow] (agent) -- (redis);
+\draw[arrow] (agent) -- (llm);
+\draw[arrow] (agent) to[bend left=14] node[below]{response} (kafka);
+\draw[arrow] (kafka) to[bend left=14] (main);
+\end{tikzpicture}
+\caption{系統架構圖}
+\end{figure}
+
+\begin{table}[H]
+\caption{主要模組與功能}
+\centering
+\begin{tabularx}{\textwidth}{>{\bfseries}p{3.1cm}X}
+\toprule
+模組 & 功能說明 \\
+\midrule
+main-service & 對前端提供 REST API，負責請求驗證、Kafka 訊息送出與非同步回應橋接。\\
+multiagent-service & 執行路徑規劃、聊天代理、地理編碼、VD 即時路況、停車資訊更新與背景工作。\\
+資料層 & TimescaleDB/PostGIS 儲存路網、VD、停車與空間資料；Redis 提供快取與即時資料讀取。\\
+前端展示 & 提供地址自動完成、地圖點選、路線視覺化、聊天式查詢與亮暗色主題切換。\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\sectiontitle{二、專題結果與亮點：}
+
+本專題已完成可端到端執行的展示堆疊。使用者可透過前端輸入地址或直接在地圖上點選起終點，系統會呼叫 main-service，再由 Kafka 轉交 multi-agent service 計算路線，最後將路線折線、起終點、測速照相與目的地附近停車資訊回傳前端。聊天流程亦可由自然語言觸發路徑工具，讓使用者以對話方式取得路線建議與摘要說明。
+
+在資料規模方面，系統以 OSM 匯入台北路網，驗收條件要求 \texttt{traffic\_node} 超過 30,000 筆、\texttt{traffic\_edge} 超過 80,000 筆；VD 即時資料週期性寫入 \texttt{vd\_reading} hypertable，驗收條件為五分鐘視窗內超過 500 筆近期資料。此資料量足以支撐台北市區路徑搜尋展示，也能驗證 PostGIS 空間處理、TimescaleDB 時序資料與背景更新流程的整合。
+
+系統測試涵蓋後端、代理服務與前端。multi-agent service 使用 pytest 驗證路徑搜尋、權重提供者、VD 資料、停車資訊、地理編碼、Kafka consumer 與聊天代理；main-service 使用 Gradle Test 驗證 REST controller、Kafka producer/consumer 與 pending request store；前端使用 Vitest 驗證互動元件與 hooks。目前三項測試套件合計約 250 項，涵蓋工具呼叫、錯誤回退、逾時與訊息格式容錯等情境。
+
+\begin{table}[H]
+\caption{驗收與展示重點}
+\centering
+\begin{tabularx}{\textwidth}{>{\bfseries}p{4cm}X}
+\toprule
+項目 & 結果與意義 \\
+\midrule
+路網建置 & OSM 路網轉為節點與邊資料，支援 A* 快速搜尋與號誌節點懲罰。\\
+即時路況 & TDX Live VD 資料定期更新，轉換為道路權重，使 ETA 與路線選擇能反映交通狀態。\\
+多代理互動 & 聊天代理可呼叫路徑工具，將自然語言需求轉換為結構化路線查詢。\\
+前端展示 & 地圖顯示路線、起終點、測速照相與停車資訊，支援地址搜尋與地圖點選。\\
+容錯設計 & 外部 API 不可用時可回退到基礎權重；Kafka consumer 對未知 topic、JSON 錯誤與 handler 例外具備容錯。\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+本專題的創新點在於將「即時開放資料驅動的動態路徑規劃」與「可工具呼叫的聊天代理」整合到同一個展示系統，而非只停留在單一演算法或單一網頁介面。使用者能從地圖互動、REST API、Kafka 訊息與聊天對話等不同入口取得一致的路線結果；開發者也能透過資料庫、快取、背景任務與測試紀錄追蹤每個決策來源。相較於僅回傳靜態最短路徑的做法，本系統更能呈現智慧城市交通應用中資料即時性、服務解耦與 AI 輔助互動的價值。
+
+未來可延伸方向包含調校號誌與路段速度權重、加入外部 ETA API 作為校準參考、擴大路網覆蓋範圍、導入更高效能的 routing engine，以及將歷史 VD 資料用於尖離峰預測。若進一步結合事件偵測、施工資料或大眾運輸資訊，系統可從即時導航展示擴展為更完整的城市交通決策輔助平台。
+
+\end{document}
