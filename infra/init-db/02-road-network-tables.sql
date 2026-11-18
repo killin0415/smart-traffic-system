@@ -32,6 +32,14 @@ CREATE INDEX IF NOT EXISTS ix_traffic_edge_geom
 CREATE INDEX IF NOT EXISTS ix_traffic_edge_road_class
     ON traffic_edge (road_class);
 
+-- FK-side indexes: keep traffic_node deletes (graph contraction) and
+-- adjacency lookups from seq-scanning traffic_edge.
+CREATE INDEX IF NOT EXISTS ix_traffic_edge_source
+    ON traffic_edge (source_node_id);
+
+CREATE INDEX IF NOT EXISTS ix_traffic_edge_target
+    ON traffic_edge (target_node_id);
+
 -- Speed camera static data
 CREATE TABLE IF NOT EXISTS speed_camera (
     id              SERIAL PRIMARY KEY,

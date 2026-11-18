@@ -145,6 +145,8 @@ services:
       POSTGRES_DB: traffic_data
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: secret
+      # 1 = ignore the shipped snapshot and run the full OSM pipeline.
+      FORCE_REBUILD: ${FORCE_REBUILD:-0}
     volumes:
       - osm_data:/data
     networks:

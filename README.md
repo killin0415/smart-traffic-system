@@ -18,8 +18,16 @@ End-to-end demo stack for a Taipei-area smart traffic navigation system.
 ## Quick start (Docker — one command)
 
 For running on a fresh machine. Builds all three application images, brings
-up the infra, seeds the Taipei road graph (≈10–20 min on first boot),
-and serves the SPA on <http://localhost:5173>.
+up the infra, seeds the Taipei road graph, and serves the SPA on
+<http://localhost:5173>.
+
+`data-init` restores the committed snapshot
+(`infra/data-init/seed/taipei-graph.dump`) in a few seconds. If the graph SQL,
+`osm2pgsql.style` or bbox changed since the snapshot was exported (or you set
+`FORCE_REBUILD=1`), it falls back to the full OSM pipeline: a ~320 MB
+Geofabrik download on first run, then about a minute of processing. After
+changing the graph SQL, refresh the snapshot with
+`bash infra/data-init/export-snapshot.sh` and commit it.
 
 ```powershell
 # 1. Copy env template and fill in your DeepSeek key (TDX is optional).

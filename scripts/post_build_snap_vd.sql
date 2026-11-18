@@ -21,7 +21,12 @@ FROM (
     CROSS JOIN LATERAL (
         SELECT te.road_class
         FROM traffic_edge te
-        WHERE ST_DWithin(te.geom::geography, v2.geom::geography, 100)
+        -- Bbox prefilter on the raw geometry so ix_traffic_edge_geom is used
+        -- (the ::geography cast alone defeats the index -> full scan per VD).
+        -- 0.0015 deg is >= 150 m at Taipei's latitude, a strict superset of
+        -- the 100 m geography test below.
+        WHERE te.geom && ST_Expand(v2.geom, 0.0015)
+          AND ST_DWithin(te.geom::geography, v2.geom::geography, 100)
         ORDER BY ST_Distance(te.geom::geography, v2.geom::geography)
         LIMIT 1
     ) e

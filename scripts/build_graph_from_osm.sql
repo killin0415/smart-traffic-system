@@ -32,6 +32,18 @@ BEGIN;
 -- 0. Reset target tables (CASCADE wipes speed_camera.nearest_edge_id refs too).
 TRUNCATE TABLE traffic_edge, traffic_node CASCADE;
 
+-- FK-side indexes. Without these, every DELETE FROM traffic_node in the
+-- contraction step triggers a seq scan of traffic_edge for the FK check, and
+-- the recursive chain walk re-scans traffic_edge on every hop — together
+-- that was the dominant cost of a full Taipei build. (Also declared in
+-- infra/init-db/02-road-network-tables.sql; repeated here so DB volumes
+-- created before that change pick them up.)
+CREATE INDEX IF NOT EXISTS ix_traffic_edge_source ON traffic_edge (source_node_id);
+CREATE INDEX IF NOT EXISTS ix_traffic_edge_target ON traffic_edge (target_node_id);
+
+-- Temp tables are never auto-analyzed, so every big temp table below gets an
+-- explicit ANALYZE; without stats the planner picks nested loops on 100k+ rows.
+
 -- 1. Filtered driveable ways (carriageways only).
 DROP TABLE IF EXISTS _drivable_ways;
 CREATE TEMP TABLE _drivable_ways AS
@@ -65,6 +77,7 @@ FROM _drivable_ways
 WHERE GeometryType(geom_3857) = 'LINESTRING';
 
 CREATE INDEX ON _ways_4326 USING GIST (geom);
+ANALYZE _ways_4326;
 
 \echo 'build_graph_from_osm: extracted drivable ways'
 
@@ -95,6 +108,7 @@ SELECT id, geom AS pt
 FROM traffic_node;
 CREATE INDEX ON _vertex_id USING GIST (pt);
 CREATE UNIQUE INDEX ON _vertex_id (pt);
+ANALYZE _vertex_id;
 
 -- 4. Build edge pairs by walking consecutive snapped vertices on each way.
 DROP TABLE IF EXISTS _edge_segments;
@@ -112,6 +126,8 @@ FROM _ways_4326 w,
          SELECT (dp).path AS path, (dp).geom AS pt
          FROM ST_DumpPoints(w.geom) dp
      ) seg;
+CREATE INDEX ON _edge_segments (osm_id, (path[1]));
+ANALYZE _edge_segments;
 
 -- Sequence pairs within each way. The grid-equality filter is a vertex-level
 -- self-loop guard: when two consecutive OSM vertices snap to the same grid
@@ -133,6 +149,7 @@ JOIN _edge_segments s2
   ON s1.osm_id = s2.osm_id
  AND s2.path[1] = s1.path[1] + 1                     -- next vertex along way
 WHERE NOT ST_Equals(s1.pt, s2.pt);
+ANALYZE _edge_pairs;
 
 -- 4b. Direction-aware insert.
 --   direction_kind = 'fwd'  -> single A->B  (oneway=TRUE)
@@ -186,6 +203,9 @@ SELECT
 FROM expanded ex
 JOIN _vertex_id va ON va.pt = ex.src_pt
 JOIN _vertex_id vb ON vb.pt = ex.tgt_pt;
+
+ANALYZE traffic_node;
+ANALYZE traffic_edge;
 
 \echo 'build_graph_from_osm: inserted traffic_edge rows (pre-contraction)'
 
@@ -281,6 +301,18 @@ WHERE d.undirected_degree = 2
      OR (dc.in_count = 1 AND dc.out_count = 1)   -- oneway   pass-through
   );
 CREATE UNIQUE INDEX ON _contractible (node_id);
+ANALYZE _contractible;
+
+-- Performance notes for the walk below:
+--   * It carries only edge ids. Accumulating geometry/name arrays per hop
+--     copied the whole array on every step (O(L^2) per chain) and dominated
+--     the runtime; geometry + name are assembled afterwards (_merged_edges).
+--   * Each recursion level must look up the next edge through
+--     ix_traffic_edge_source. Left to itself the planner hashes all of
+--     traffic_edge again on every level (hundreds of levels for long curvy
+--     roads), so hash/merge joins are disabled for this one statement.
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
 
 DROP TABLE IF EXISTS _chains_to_merge;
 CREATE TEMP TABLE _chains_to_merge AS
@@ -296,12 +328,14 @@ WITH RECURSIVE chain_walk AS (
         e.oneway,
         ARRAY[e.id]               AS edge_ids,
         e.length_km               AS total_length,
-        ARRAY[e.geom]::geometry[] AS geoms,
-        ARRAY[NULLIF(e.road_name, '')]::text[] AS names,
         1                         AS depth
     FROM traffic_edge e
-    WHERE e.target_node_id IN (SELECT node_id FROM _contractible)
-      AND e.source_node_id NOT IN (SELECT node_id FROM _contractible)
+    -- EXISTS / NOT EXISTS rather than IN / NOT IN: with the default 4 MB
+    -- work_mem the 160k-row NOT IN list can't be hashed, and Postgres falls
+    -- back to re-scanning it once per edge (O(edges x nodes) — this alone
+    -- took >10 min on the Taipei graph). NOT EXISTS plans as an anti-join.
+    WHERE EXISTS (SELECT 1 FROM _contractible k WHERE k.node_id = e.target_node_id)
+      AND NOT EXISTS (SELECT 1 FROM _contractible k WHERE k.node_id = e.source_node_id)
 
     UNION ALL
 
@@ -319,8 +353,6 @@ WITH RECURSIVE chain_walk AS (
         c.oneway,
         c.edge_ids || ne.id,
         c.total_length + ne.length_km,
-        c.geoms || ne.geom,
-        c.names || NULLIF(ne.road_name, ''),
         c.depth + 1
     FROM chain_walk c
     JOIN traffic_edge ne
@@ -329,7 +361,7 @@ WITH RECURSIVE chain_walk AS (
      AND ne.road_class      = c.road_class
      AND ne.max_speed_kmh   = c.max_speed_kmh
      AND ne.oneway          = c.oneway
-    WHERE c.cur_node IN (SELECT node_id FROM _contractible)
+    WHERE EXISTS (SELECT 1 FROM _contractible k WHERE k.node_id = c.cur_node)
       AND c.depth < 1000      -- runaway safety
 )
 SELECT DISTINCT ON (first_edge_id)
@@ -339,14 +371,42 @@ SELECT DISTINCT ON (first_edge_id)
     max_speed_kmh,
     oneway,
     edge_ids,
-    total_length,
-    geoms,
-    names
+    total_length
 FROM chain_walk
-WHERE cur_node NOT IN (SELECT node_id FROM _contractible)
+WHERE NOT EXISTS (SELECT 1 FROM _contractible k WHERE k.node_id = chain_walk.cur_node)
   AND array_length(edge_ids, 1) >= 2  -- skip anchor-only walks (no contraction)
   AND cur_node <> chain_src           -- skip cul-de-sac loops (would self-loop)
 ORDER BY first_edge_id, array_length(edge_ids, 1) DESC;
+ANALYZE _chains_to_merge;
+
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+
+-- Assemble each merged edge's geometry (segments in walk order) and name
+-- while the original chain edges still exist. road_name is the first
+-- non-null name along the chain; chain segments inside one OSM way share a
+-- name, and cross-way chains where names differ keep the first one (good
+-- enough for display).
+DROP TABLE IF EXISTS _merged_edges;
+CREATE TEMP TABLE _merged_edges AS
+SELECT
+    c.chain_src,
+    c.chain_tgt,
+    c.road_class,
+    c.max_speed_kmh,
+    c.oneway,
+    c.total_length,
+    agg.road_name,
+    agg.geom
+FROM _chains_to_merge c
+CROSS JOIN LATERAL (
+    SELECT
+        (array_agg(NULLIF(e.road_name, '') ORDER BY u.ord)
+            FILTER (WHERE NULLIF(e.road_name, '') IS NOT NULL))[1] AS road_name,
+        ST_LineMerge(ST_Collect(e.geom ORDER BY u.ord))            AS geom
+    FROM unnest(c.edge_ids) WITH ORDINALITY AS u(edge_id, ord)
+    JOIN traffic_edge e ON e.id = u.edge_id
+) agg;
 
 DO $$
 DECLARE
@@ -366,9 +426,7 @@ WHERE id IN (
     SELECT unnest(edge_ids) FROM _chains_to_merge
 );
 
--- Insert merged edges. road_name is the first non-null name along the chain;
--- chain segments inside one OSM way share a name, and cross-way chains where
--- names differ keep the first one (good enough for display).
+-- Insert merged edges.
 INSERT INTO traffic_edge (
     source_node_id, target_node_id, road_name,
     length_km, road_class, max_speed_kmh, oneway, geom
@@ -376,13 +434,13 @@ INSERT INTO traffic_edge (
 SELECT
     chain_src,
     chain_tgt,
-    (SELECT n FROM unnest(names) AS t(n) WHERE n IS NOT NULL LIMIT 1) AS road_name,
+    road_name,
     total_length,
     road_class,
     max_speed_kmh,
     oneway,
-    ST_LineMerge(ST_Collect(geoms))::geometry(LineString, 4326) AS geom
-FROM _chains_to_merge;
+    geom::geometry(LineString, 4326)
+FROM _merged_edges;
 
 -- Now the contracted interior nodes are FK-orphaned (no edges reference them
 -- any more) and safe to delete. The NOT EXISTS guard keeps any contractible
@@ -391,9 +449,13 @@ FROM _chains_to_merge;
 -- still have their original edges referencing them.
 DELETE FROM traffic_node tn
 WHERE tn.id IN (SELECT node_id FROM _contractible)
+  -- Two NOT EXISTS instead of one `source = id OR target = id`: the OR
+  -- form can't use the per-column indexes and degrades to a seq scan per node.
   AND NOT EXISTS (
-      SELECT 1 FROM traffic_edge te
-      WHERE te.source_node_id = tn.id OR te.target_node_id = tn.id
+      SELECT 1 FROM traffic_edge te WHERE te.source_node_id = tn.id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM traffic_edge te WHERE te.target_node_id = tn.id
   );
 
 \echo 'build_graph_from_osm: degree-2 chain contraction complete'
@@ -406,17 +468,23 @@ WHERE tn.id IN (SELECT node_id FROM _contractible)
 --    block sizes).
 -- ---------------------------------------------------------------------------
 
+-- Materialise the signals as an indexed geography column first. The old form
+-- (ST_Transform(p.way)::geography inside the EXISTS) could not use any index,
+-- so it recomputed every signal's transform for every node (nodes x signals).
+DROP TABLE IF EXISTS _signals;
+CREATE TEMP TABLE _signals AS
+SELECT ST_Transform(p.way, 4326)::geography AS geog
+FROM planet_osm_point p
+WHERE p.highway = 'traffic_signals';
+CREATE INDEX ON _signals USING GIST (geog);
+ANALYZE _signals;
+
 UPDATE traffic_node tn
 SET has_signal = TRUE
 WHERE EXISTS (
     SELECT 1
-    FROM planet_osm_point p
-    WHERE p.highway = 'traffic_signals'
-      AND ST_DWithin(
-              ST_Transform(p.way, 4326)::geography,
-              tn.geom::geography,
-              30
-          )
+    FROM _signals s
+    WHERE ST_DWithin(s.geog, tn.geom::geography, 30)
 );
 
 \echo 'build_graph_from_osm: updated traffic_node.has_signal'
